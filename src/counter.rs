@@ -42,8 +42,17 @@ struct Book {
 impl Book {
     fn open(log_path: PathBuf) -> std::io::Result<Self> {
         let (days, lines) = load(&log_path)?;
-        let log = BufWriter::new(OpenOptions::new().create(true).append(true).open(&log_path)?);
-        let mut book = Self { log_path, log, days };
+        let log = BufWriter::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)?,
+        );
+        let mut book = Self {
+            log_path,
+            log,
+            days,
+        };
         // 每记一次追加一行，重启时压实成每人一行，免得日志无限长
         let pilgrims: usize = book.days.values().map(|d| d.pilgrims.len()).sum();
         if lines > pilgrims {
@@ -76,7 +85,11 @@ impl Book {
         let total = record.total;
 
         // 日志写失败不该拦住信众，最多是重启后丢次数
-        let _ = writeln!(self.log, "{day}\t{id}\t{}\t{}", pilgrim.rank, pilgrim.visits);
+        let _ = writeln!(
+            self.log,
+            "{day}\t{id}\t{}\t{}",
+            pilgrim.rank, pilgrim.visits
+        );
         let _ = self.log.flush();
 
         if fresh_day {
@@ -177,11 +190,17 @@ fn load(path: &Path) -> std::io::Result<(HashMap<String, DayRecord>, usize)> {
             continue;
         };
         // 第四列是次数，老日志没有这一列，按拜过一次算
-        let visits = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(1);
+        let visits = parts
+            .next()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1);
         lines += 1;
 
         let record = days.entry(day.to_string()).or_default();
-        let entry = record.pilgrims.entry(id.to_string()).or_insert(Pilgrim { rank, visits });
+        let entry = record
+            .pilgrims
+            .entry(id.to_string())
+            .or_insert(Pilgrim { rank, visits });
         // 同一个人有多行时，以最大次数为准
         entry.visits = entry.visits.max(visits);
         record.total = record.total.max(rank);
@@ -300,7 +319,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // 上一版的日志没有第四列
-        fs::write(dir.join("worship.log"), format!("{}\tdeadbeefdeadbeef\t1\n", today())).unwrap();
+        fs::write(
+            dir.join("worship.log"),
+            format!("{}\tdeadbeefdeadbeef\t1\n", today()),
+        )
+        .unwrap();
 
         let mut c = Counter::open(&dir, "salt".into()).unwrap();
         let next = c.ring("1.1.1.1");

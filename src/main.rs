@@ -14,11 +14,11 @@ use std::sync::{Arc, Mutex};
 
 use avatars::Avatars;
 use counter::Counter;
-use space::{Action, Choosing, World};
 use russh::keys::{HashAlg, PrivateKey};
 use russh::server::{Auth, Handler, Msg, Session};
 use russh::MethodKind;
 use russh::{Channel, ChannelId};
+use space::{Action, Choosing, World};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -47,8 +47,7 @@ const LEAVE: &str = "\x1b[2J\x1b[H\x1b[?25h鐘聲遠去 · 慢走 🔔\r\n";
 
 /// 每次进寺最多待一分钟，时辰一到自动送客——免得有人长占席位
 const SESSION_CAP: std::time::Duration = std::time::Duration::from_secs(60);
-const TIME_UP: &str =
-    "\x1b[2J\x1b[H\x1b[?25h一炷香的緣分已滿 · 鐘樓暫別 · 慢走 🔔\r\n";
+const TIME_UP: &str = "\x1b[2J\x1b[H\x1b[?25h一炷香的緣分已滿 · 鐘樓暫別 · 慢走 🔔\r\n";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,7 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let http_ports: Vec<u16> = env_ports("HTTP_PORT", "8080");
     let host_key_path =
         PathBuf::from(std::env::var("XIAOZHONGSI_HOST_KEY").unwrap_or_else(|_| "host_key".into()));
-    let data_dir = PathBuf::from(std::env::var("XIAOZHONGSI_DATA_DIR").unwrap_or_else(|_| "data".into()));
+    let data_dir =
+        PathBuf::from(std::env::var("XIAOZHONGSI_DATA_DIR").unwrap_or_else(|_| "data".into()));
     let salt = std::env::var("XIAOZHONGSI_SALT").unwrap_or_else(|_| "xiaozhongsi".into());
 
     let counter = Arc::new(Mutex::new(Counter::open(&data_dir, salt)?));
@@ -190,7 +190,11 @@ async fn serve_http(socket: TcpListener) {
                 .unwrap_or("");
 
             let (status, ctype, body) = if method != "GET" && method != "HEAD" {
-                (405, "text/plain; charset=utf-8", "小鐘寺只受 GET 之禮\n".to_string())
+                (
+                    405,
+                    "text/plain; charset=utf-8",
+                    "小鐘寺只受 GET 之禮\n".to_string(),
+                )
             } else {
                 site::route(&path, ua)
             };
@@ -231,7 +235,9 @@ fn reason(status: u16) -> &'static str {
 fn load_or_create_host_key(path: &PathBuf) -> Result<PrivateKey, Box<dyn std::error::Error>> {
     if let Ok(pem) = std::env::var("XIAOZHONGSI_HOST_KEY_PEM") {
         if !pem.trim().is_empty() {
-            return Ok(PrivateKey::from_openssh(pem.replace("\\n", "\n").as_bytes())?);
+            return Ok(PrivateKey::from_openssh(
+                pem.replace("\\n", "\n").as_bytes(),
+            )?);
         }
     }
     if path.exists() {
@@ -477,7 +483,12 @@ impl Temple {
 
     /// 自己动了：先画给自己，再喊一声让别人也重画。
     /// bell=true 时前置一个终端响铃字符（\x07），敲钟时用。
-    fn push(&self, channel: ChannelId, session: &mut Session, bell: bool) -> Result<(), russh::Error> {
+    fn push(
+        &self,
+        channel: ChannelId,
+        session: &mut Session,
+        bell: bool,
+    ) -> Result<(), russh::Error> {
         let frame = self
             .world
             .lock()
@@ -564,7 +575,10 @@ impl Temple {
         let mut c = self.counter.lock().unwrap_or_else(|e| e.into_inner());
         let s = c.ring(&fp);
         if s.visits > 1 {
-            format!("你今天第 {} 次撞鐘 · 今天共 {} 位撞過鐘 🔔", s.visits, s.total)
+            format!(
+                "你今天第 {} 次撞鐘 · 今天共 {} 位撞過鐘 🔔",
+                s.visits, s.total
+            )
         } else {
             format!("你是今天第 {} 位撞鐘 🔔", s.rank)
         }
@@ -578,7 +592,10 @@ impl Temple {
         let mut c = self.counter.lock().unwrap_or_else(|e| e.into_inner());
         let s = c.burn(&fp);
         if s.visits > 1 {
-            format!("你今天第 {} 炷香 · 今天共 {} 位燒過香 🔥", s.visits, s.total)
+            format!(
+                "你今天第 {} 炷香 · 今天共 {} 位燒過香 🔥",
+                s.visits, s.total
+            )
         } else {
             format!("你是今天第 {} 位燒香 🔥", s.rank)
         }

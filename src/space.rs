@@ -7,9 +7,7 @@ use std::collections::HashMap;
 /// 可选头像，首次进廟时挑一个，之后按公钥记住。
 /// 全部是单码位 emoji：ZWJ 组合序列（如 👩‍🦰）在不同终端会拆成两个字形、
 /// 宽度从 2 格变 4 格，会把地图撑歪。
-pub const AVATARS: &[&str] = &[
-    "🧑", "👧", "🧝", "🧛", "👻", "🤖",
-];
+pub const AVATARS: &[&str] = &["🧑", "👧", "🧝", "🧛", "👻", "🤖"];
 
 /// 选头像界面每行摆几个。摆太多会超出终端宽度。
 const PER_ROW: usize = 10;
@@ -163,7 +161,6 @@ impl World {
         }
     }
 
-
     pub fn handle(&mut self, id: Id, key: Key) -> Action {
         let Some(me) = self.pilgrims.get(&id).cloned() else {
             return Action::Idle;
@@ -292,26 +289,21 @@ impl World {
                     out.push_str(&format!("  \x1b[33m{line}\x1b[0m\r\n"));
                 }
             }
-            Some(p) if can_ring(p.at) => {
-                out.push_str("  \x1b[2m🔔 鐘在側 · 按空格撞鐘\x1b[0m\r\n")
-            }
+            Some(p) if can_ring(p.at) => out.push_str("  \x1b[2m🔔 鐘在側 · 按空格撞鐘\x1b[0m\r\n"),
             Some(p) if can_burn(p.at) => {
                 out.push_str("  \x1b[2m🔥 香爐在前 · 按空格燒香\x1b[0m\r\n")
             }
             // 站在广场下缘，再往下一步就出寺
-            Some(p) if p.at.0 == H - 1 => {
-                out.push_str("  \x1b[2m↓ 再往下一步 · 即出寺\x1b[0m\r\n")
-            }
+            Some(p) if p.at.0 == H - 1 => out.push_str("  \x1b[2m↓ 再往下一步 · 即出寺\x1b[0m\r\n"),
             // 站在广场左/右缘，再往外一步就出寺
-            Some(p) if p.at.1 == 0 => {
-                out.push_str("  \x1b[2m← 再往左一步 · 即出寺\x1b[0m\r\n")
-            }
-            Some(p) if p.at.1 == W - 1 => {
-                out.push_str("  \x1b[2m→ 再往右一步 · 即出寺\x1b[0m\r\n")
-            }
+            Some(p) if p.at.1 == 0 => out.push_str("  \x1b[2m← 再往左一步 · 即出寺\x1b[0m\r\n"),
+            Some(p) if p.at.1 == W - 1 => out.push_str("  \x1b[2m→ 再往右一步 · 即出寺\x1b[0m\r\n"),
             _ => out.push_str("  \x1b[2m方向鍵走動\x1b[0m\r\n"),
         }
-        out.push_str(&format!("  \x1b[2m寺中此刻 {} 人\x1b[0m\r\n", self.present()));
+        out.push_str(&format!(
+            "  \x1b[2m寺中此刻 {} 人\x1b[0m\r\n",
+            self.present()
+        ));
         out
     }
 }
@@ -525,7 +517,10 @@ mod tests {
         put(&mut w, me, (8, 4)); // 香炉正下方
         assert!(w.render(me).contains("按空格燒香"), "站定有提示");
         assert!(matches!(w.handle(me, Key::Space), Action::Burn));
-        assert!(!w.render(me).contains("按空格燒香"), "烧香姿态里不再提示可烧");
+        assert!(
+            !w.render(me).contains("按空格燒香"),
+            "烧香姿态里不再提示可烧"
+        );
         assert!(matches!(w.handle(me, Key::Other), Action::Redraw)); // 起身
         assert!(w.render(me).contains("按空格燒香"), "起身后又能烧");
         // 香炉本身挡路
@@ -538,7 +533,10 @@ mod tests {
         let (mut w, me) = one();
         put(&mut w, me, (0, 3)); // 钟的左边
         assert!(matches!(w.handle(me, Key::Space), Action::Ring));
-        assert!(!w.render(me).contains("按空格撞鐘"), "撞钟姿态里不再提示可撞");
+        assert!(
+            !w.render(me).contains("按空格撞鐘"),
+            "撞钟姿态里不再提示可撞"
+        );
         assert!(matches!(w.handle(me, Key::Other), Action::Redraw));
         assert!(w.render(me).contains(AVATARS[0]));
         put(&mut w, me, (0, 5)); // 钟的右边

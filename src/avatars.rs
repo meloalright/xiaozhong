@@ -95,9 +95,21 @@ mod tests {
         let mut a = Avatars::open(&dir).unwrap();
         assert_eq!(a.get("abc"), Some(5));
         assert_eq!(a.get("def"), Some(7));
-        assert_eq!(fs::read_to_string(dir.join("avatars.log")).unwrap().lines().count(), 3);
+        assert_eq!(
+            fs::read_to_string(dir.join("avatars.log"))
+                .unwrap()
+                .lines()
+                .count(),
+            3
+        );
         a.compact_if_needed();
-        assert_eq!(fs::read_to_string(dir.join("avatars.log")).unwrap().lines().count(), 2);
+        assert_eq!(
+            fs::read_to_string(dir.join("avatars.log"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

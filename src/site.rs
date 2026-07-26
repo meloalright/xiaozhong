@@ -26,7 +26,11 @@ pub fn route(path: &str, user_agent: &str) -> (u16, &'static str, String) {
         "/favicon.svg" | "/favicon.ico" => {
             (200, "image/svg+xml; charset=utf-8", FAVICON.to_string())
         }
-        "/healthz" => (200, "application/json; charset=utf-8", "{\"ok\":true}".to_string()),
+        "/healthz" => (
+            200,
+            "application/json; charset=utf-8",
+            "{\"ok\":true}".to_string(),
+        ),
         _ => (404, "text/plain; charset=utf-8", "此路無廟\n".to_string()),
     }
 }
