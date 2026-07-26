@@ -7,7 +7,7 @@ use std::collections::HashMap;
 /// 可选头像，首次进廟时挑一个，之后按公钥记住。
 /// 全部是单码位 emoji：ZWJ 组合序列（如 👩‍🦰）在不同终端会拆成两个字形、
 /// 宽度从 2 格变 4 格，会把地图撑歪。
-pub const AVATARS: &[&str] = &["🧑", "👧", "🧝", "🧛", "👻", "🤖"];
+pub const AVATARS: &[&str] = &["🧑", "👧", "🧝", "🧛", "👸", "👷"];
 
 /// 选头像界面每行摆几个。摆太多会超出终端宽度。
 const PER_ROW: usize = 10;

@@ -47,8 +47,10 @@ jobs:
           fi
 
       - name: 探测 · 线上烧香 / 撞钟 / 离寺
+        # --pick 5 = 第 6 个头像 👷（探测这位固定选工作人员的样子）。
+        # 只有这把 key 第一次进寺才会真的挑一次，之后寺里记着就直接进。
         run: |
-          python3 ci/drive.py --host xiaozhongsi.sh --port 22 --key /tmp/pk --settle 1.0 \
+          python3 ci/drive.py --host xiaozhongsi.sh --port 22 --key /tmp/pk --settle 1.0 --pick 5 \
             --steps up,space,enter,left,up,up,up,up,up,up,up,up,space,enter,left,left,left,left \
             --expect 香爐在前 --expect 鐘在側 \
             --expect 今天第 --expect 鐘聲遠去
