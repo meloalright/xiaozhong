@@ -30,10 +30,11 @@ jobs:
       - name: 备一把香客公钥
         run: ssh-keygen -t ed25519 -N '' -f /tmp/ck -q
 
-      - name: 走一遍 · 烧香 / 撞钟 / 离寺
+      - name: 走一遍 · 选头像 / 烧香 / 撞钟 / 离寺
         run: |
-          python3 ci/drive.py --host 127.0.0.1 --port 2222 --key /tmp/ck \
+          python3 ci/drive.py --host 127.0.0.1 --port 2222 --key /tmp/ck --pick 3 \
             --steps up,space,enter,left,up,up,up,up,up,up,up,up,space,enter,left,left,left,left \
+            --expect 先擇一副面容 --expect 🧛 \
             --expect 香爐在前 --expect 位燒香 \
             --expect 鐘在側 --expect 位撞鐘 \
             --expect 鐘聲遠去
