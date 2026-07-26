@@ -1,0 +1,50 @@
+app = "xiaozhongsi"
+primary_region = "lax"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SSH_PORT = "2222"
+  HTTP_PORT = "8080"
+  XIAOZHONGSI_DATA_DIR = "/data"
+
+# 香火簿要持久化，否则机器一停号码就归零
+[[mounts]]
+  source = "xiaozhongsi_data"
+  destination = "/data"
+
+# SSH：外部 22 与 2222 裸 TCP 透传到内部 2222，容器里没有 sshd 抢端口
+[[services]]
+  internal_port = 2222
+  protocol = "tcp"
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[services.ports]]
+    port = 22
+
+  [[services.ports]]
+    port = 2222
+
+# HTTP：Fly 在 443 帮我们终结 TLS，转发明文 HTTP 到内部 8080
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = false
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

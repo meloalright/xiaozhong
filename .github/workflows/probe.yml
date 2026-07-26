@@ -1,0 +1,51 @@
+name: probe
+
+# 每小时整点真连一次线上 ssh xiaozhongsi.sh，走动 + 烧香 + 撞钟 + 离寺。
+# 用固定的探测公钥（secret PROBE_SSH_KEY_B64），所以线上统计里它只算「同一位香客」。
+on:
+  schedule:
+    - cron: "0 * * * *" # UTC 整点，每小时一次
+  workflow_dispatch:
+
+concurrency:
+  group: probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 预热 · 唤醒可能休眠的 Fly 机器
+        run: curl -sS --max-time 40 https://xiaozhongsi.sh/ >/dev/null || true
+
+      - name: 备探测私钥（有 secret 用固定的，否则临时生成）
+        env:
+          PROBE_B64: ${{ secrets.PROBE_SSH_KEY_B64 }}
+        run: |
+          if [ -n "$PROBE_B64" ]; then
+            echo "$PROBE_B64" | base64 -d > /tmp/pk
+            chmod 600 /tmp/pk
+            echo "用固定探测公钥"
+          else
+            ssh-keygen -t ed25519 -N '' -f /tmp/pk -q
+            echo "未设 secret，临时生成一把（本次会在统计里算作新香客）"
+          fi
+
+      - name: 校验线上 host key 指纹未变
+        run: |
+          fp=$(ssh-keyscan -p 22 -t ed25519 xiaozhongsi.sh 2>/dev/null | ssh-keygen -lf - | awk '{print $2}')
+          echo "线上指纹: $fp"
+          expect="SHA256:QWZ8RawJRn/Dl8HP2j/NxxuH4+cHnde0/qRuKZOSvIU"
+          if [ "$fp" != "$expect" ]; then
+            echo "::error::host key 变了！expect=$expect got=$fp"
+            exit 1
+          fi
+
+      - name: 探测 · 线上烧香 / 撞钟 / 离寺
+        run: |
+          python3 ci/drive.py --host xiaozhongsi.sh --port 22 --key /tmp/pk --settle 1.0 \
+            --steps up,space,enter,left,up,up,up,up,up,up,up,up,space,enter,left,left,left,left \
+            --expect 香爐在前 --expect 鐘在側 \
+            --expect 今天第 --expect 鐘聲遠去

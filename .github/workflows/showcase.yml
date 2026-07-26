@@ -1,0 +1,45 @@
+name: showcase
+
+# 本地起一个真实实例，用固定的 TUI 脚本走一遍：进寺→烧香→撞钟→走到边缘→离寺
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  showcase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build
+
+      - name: 起一座本地小钟寺
+        run: |
+          mkdir -p /tmp/xzs-data
+          XIAOZHONGSI_DATA_DIR=/tmp/xzs-data HTTP_PORT=8080 SSH_PORT=2222 \
+            ./target/debug/xiaozhongsi > /tmp/xzs.log 2>&1 &
+          echo $! > /tmp/xzs.pid
+          echo "等 SSH 端口起来…"
+          timeout 25 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.5; done'
+
+      - name: 备一把香客公钥
+        run: ssh-keygen -t ed25519 -N '' -f /tmp/ck -q
+
+      - name: 走一遍 · 烧香 / 撞钟 / 离寺
+        run: |
+          python3 ci/drive.py --host 127.0.0.1 --port 2222 --key /tmp/ck \
+            --steps up,space,enter,left,up,up,up,up,up,up,up,up,space,enter,left,left,left,left \
+            --expect 香爐在前 --expect 位燒香 \
+            --expect 鐘在側 --expect 位撞鐘 \
+            --expect 鐘聲遠去
+
+      - name: 关寺 & 看日志
+        if: always()
+        run: |
+          [ -f /tmp/xzs.pid ] && kill "$(cat /tmp/xzs.pid)" 2>/dev/null || true
+          echo '--- server log ---'; cat /tmp/xzs.log || true

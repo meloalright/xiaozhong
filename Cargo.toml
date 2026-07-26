@@ -1,0 +1,18 @@
+[package]
+name = "xiaozhongsi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# 独立于根目录那个 Worker crate
+[workspace]
+
+[dependencies]
+russh = "0.62"
+rand = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
