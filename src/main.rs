@@ -18,7 +18,7 @@ use russh::keys::{HashAlg, PrivateKey};
 use russh::server::{Auth, Handler, Msg, Session};
 use russh::MethodKind;
 use russh::{Channel, ChannelId};
-use space::{Action, Choosing, World};
+use space::{Action, Choose, Choosing, KeyParser, World};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -89,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tick: tick.clone(),
         id: 0,
         choosing: None,
+        keys: KeyParser::default(),
     };
 
     let mut tasks = Vec::new();
@@ -264,6 +265,8 @@ struct Temple {
     id: space::Id,
     /// 还没进世界时的选头像状态。会话私有，所以不参与 Clone。
     choosing: Option<Choosing>,
+    /// 按键残段缓冲（方向键 CSI 可能跨多次 data）
+    keys: KeyParser,
 }
 
 /// 克隆出来的是一份全新会话：共享的东西继续共享，身份与状态一律归零
@@ -278,6 +281,7 @@ impl Clone for Temple {
             tick: self.tick.clone(),
             id: 0,
             choosing: None,
+            keys: KeyParser::default(),
         }
     }
 }
@@ -375,11 +379,11 @@ impl Handler for Temple {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        for key in space::parse_keys(data) {
-            // 还在选头像：选定后才落地进世界
+        for key in self.keys.feed(data) {
+            // 还在选头像：选定后才落地进世界；q 可直接离寺
             if let Some(c) = self.choosing.as_mut() {
                 match c.handle(key) {
-                    Some(picked) => {
+                    Choose::Picked(picked) => {
                         if let Some(id) = self.pilgrim_id() {
                             self.avatars
                                 .lock()
@@ -388,12 +392,23 @@ impl Handler for Temple {
                         }
                         self.choosing = None;
                         self.join_world(picked);
+                        // 进世界后再盯着别人动——选头像期间别人走动不能把推帧任务掐死
+                        self.watch(channel, session);
                         self.push(channel, session, false)?;
                     }
-                    None => {
+                    Choose::Redraw => {
                         let frame = c.render();
                         session.data(channel, frame.into_bytes())?;
                     }
+                    Choose::Leave => {
+                        self.choosing = None;
+                        session.data(channel, LEAVE.as_bytes().to_vec())?;
+                        session.exit_status_request(channel, 0)?;
+                        session.eof(channel)?;
+                        session.close(channel)?;
+                        return Ok(());
+                    }
+                    Choose::Idle => {}
                 }
                 continue;
             }
@@ -454,14 +469,14 @@ impl Temple {
                 .get(&id)
         });
 
-        // 别人走动时也要给我重画，所以开一个推帧任务盯着世界变化
-        self.watch(channel, session);
-        // 一分钟时辰到就自动送客
+        // 一分钟时辰到就自动送客（选头像也算在内，免得占着名额不进）
         self.arm_session_cap(channel, session);
 
         match known {
             Some(avatar) => {
                 self.join_world(avatar);
+                // 进世界后再盯别人——选头像阶段若已 subscribe，别人一动就会误判离寺
+                self.watch(channel, session);
                 self.push(channel, session, false)
             }
             None => {
@@ -511,22 +526,29 @@ impl Temple {
         let mut rx = self.tick.subscribe();
         let id = self.id;
         tokio::spawn(async move {
-            while let Ok(bell) = rx.recv().await {
-                let frame = {
-                    let w = world.lock().unwrap_or_else(|e| e.into_inner());
-                    // 自己已经离寺就不必再推了
-                    if !w.is_in(id) {
-                        break;
+            loop {
+                match rx.recv().await {
+                    Ok(bell) => {
+                        let frame = {
+                            let w = world.lock().unwrap_or_else(|e| e.into_inner());
+                            // 自己已经离寺就不必再推了
+                            if !w.is_in(id) {
+                                break;
+                            }
+                            w.render(id)
+                        };
+                        let mut out = Vec::new();
+                        if bell {
+                            out.push(0x07); // 别人敲钟，我这边也响一声
+                        }
+                        out.extend_from_slice(frame.as_bytes());
+                        if handle.data(channel, out).await.is_err() {
+                            break;
+                        }
                     }
-                    w.render(id)
-                };
-                let mut out = Vec::new();
-                if bell {
-                    out.push(0x07); // 别人敲钟，我这边也响一声
-                }
-                out.extend_from_slice(frame.as_bytes());
-                if handle.data(channel, out).await.is_err() {
-                    break;
+                    // 挤掉的 tick 直接跳过，不能让推帧任务就此死掉
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });

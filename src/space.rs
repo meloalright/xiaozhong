@@ -320,6 +320,18 @@ fn can_burn(at: (usize, usize)) -> bool {
     at == (CENSER_AT.0 + 1, CENSER_AT.1)
 }
 
+/// 选头像界面里一次按键的结果
+pub enum Choose {
+    /// 无关键，画面不变
+    Idle,
+    /// 光标动了，重画选头像
+    Redraw,
+    /// 选定了这个下标，可以进世界
+    Picked(usize),
+    /// 离寺（q / Ctrl-C）
+    Leave,
+}
+
 /// 首次进廟的选头像画面。这时还没进世界，所以状态是会话私有的。
 pub struct Choosing {
     cursor: usize,
@@ -330,19 +342,20 @@ impl Choosing {
         Self { cursor: 0 }
     }
 
-    /// 返回 Some(下标) 表示选定
-    pub fn handle(&mut self, key: Key) -> Option<usize> {
+    /// 选定 / 离寺 / 仅重绘选头像界面
+    pub fn handle(&mut self, key: Key) -> Choose {
         match key {
             Key::Left => {
                 self.cursor = (self.cursor + AVATARS.len() - 1) % AVATARS.len();
-                None
+                Choose::Redraw
             }
             Key::Right => {
                 self.cursor = (self.cursor + 1) % AVATARS.len();
-                None
+                Choose::Redraw
             }
-            Key::Enter | Key::Space => Some(self.cursor),
-            _ => None,
+            Key::Enter | Key::Space => Choose::Picked(self.cursor),
+            Key::Quit => Choose::Leave,
+            _ => Choose::Idle,
         }
     }
 
@@ -376,57 +389,93 @@ pub enum Key {
     Other,
 }
 
-/// 解析终端按键。方向键是 ESC [ A~D 三字节序列。
-pub fn parse_keys(buf: &[u8]) -> Vec<Key> {
-    let mut keys = Vec::new();
-    let mut i = 0;
-    while i < buf.len() {
-        match buf[i] {
-            0x1b if i + 2 < buf.len() && buf[i + 1] == b'[' => {
-                keys.push(match buf[i + 2] {
-                    b'A' => Key::Up,
-                    b'B' => Key::Down,
-                    b'C' => Key::Right,
-                    b'D' => Key::Left,
-                    _ => Key::Other,
-                });
-                i += 3;
-            }
-            b' ' => {
-                keys.push(Key::Space);
-                i += 1;
-            }
-            b'\r' | b'\n' => {
-                keys.push(Key::Enter);
-                i += 1;
-            }
-            0x03 | 0x04 | b'q' => {
-                keys.push(Key::Quit);
-                i += 1;
-            }
-            b'w' | b'k' => {
-                keys.push(Key::Up);
-                i += 1;
-            }
-            b's' | b'j' => {
-                keys.push(Key::Down);
-                i += 1;
-            }
-            b'a' | b'h' => {
-                keys.push(Key::Left);
-                i += 1;
-            }
-            b'd' | b'l' => {
-                keys.push(Key::Right);
-                i += 1;
-            }
-            _ => {
-                keys.push(Key::Other);
-                i += 1;
+/// 带缓冲的按键解析：SSH 可能把 `\x1b[A` 拆成多次 data，残段先攒着。
+#[derive(Default)]
+pub struct KeyParser {
+    pending: Vec<u8>,
+}
+
+impl KeyParser {
+    pub fn feed(&mut self, buf: &[u8]) -> Vec<Key> {
+        if self.pending.is_empty() {
+            return self.drain(buf);
+        }
+        self.pending.extend_from_slice(buf);
+        let data = std::mem::take(&mut self.pending);
+        self.drain(&data)
+    }
+
+    fn drain(&mut self, buf: &[u8]) -> Vec<Key> {
+        let mut keys = Vec::new();
+        let mut i = 0;
+        while i < buf.len() {
+            match buf[i] {
+                0x1b => {
+                    // CSI 至少三字节；不够就整段留到下次
+                    if i + 1 >= buf.len() {
+                        self.pending.extend_from_slice(&buf[i..]);
+                        break;
+                    }
+                    if buf[i + 1] != b'[' {
+                        keys.push(Key::Other);
+                        i += 1;
+                        continue;
+                    }
+                    if i + 2 >= buf.len() {
+                        self.pending.extend_from_slice(&buf[i..]);
+                        break;
+                    }
+                    keys.push(match buf[i + 2] {
+                        b'A' => Key::Up,
+                        b'B' => Key::Down,
+                        b'C' => Key::Right,
+                        b'D' => Key::Left,
+                        _ => Key::Other,
+                    });
+                    i += 3;
+                }
+                b' ' => {
+                    keys.push(Key::Space);
+                    i += 1;
+                }
+                b'\r' | b'\n' => {
+                    keys.push(Key::Enter);
+                    i += 1;
+                }
+                0x03 | 0x04 | b'q' => {
+                    keys.push(Key::Quit);
+                    i += 1;
+                }
+                b'w' | b'k' => {
+                    keys.push(Key::Up);
+                    i += 1;
+                }
+                b's' | b'j' => {
+                    keys.push(Key::Down);
+                    i += 1;
+                }
+                b'a' | b'h' => {
+                    keys.push(Key::Left);
+                    i += 1;
+                }
+                b'd' | b'l' => {
+                    keys.push(Key::Right);
+                    i += 1;
+                }
+                _ => {
+                    keys.push(Key::Other);
+                    i += 1;
+                }
             }
         }
+        keys
     }
-    keys
+}
+
+/// 一次吃完整缓冲（仅测试）。有跨包方向键请用 [`KeyParser`]。
+#[cfg(test)]
+pub fn parse_keys(buf: &[u8]) -> Vec<Key> {
+    KeyParser::default().feed(buf)
 }
 
 #[cfg(test)]
@@ -591,9 +640,16 @@ mod tests {
     fn choosing_then_confirm() {
         let mut c = Choosing::new();
         assert!(c.render().contains("先擇一副面容"));
-        assert_eq!(c.handle(Key::Right), None);
-        assert_eq!(c.handle(Key::Right), None);
-        assert_eq!(c.handle(Key::Enter), Some(2));
+        assert!(matches!(c.handle(Key::Right), Choose::Redraw));
+        assert!(matches!(c.handle(Key::Right), Choose::Redraw));
+        assert!(matches!(c.handle(Key::Enter), Choose::Picked(2)));
+    }
+
+    #[test]
+    fn choosing_quit_leaves() {
+        let mut c = Choosing::new();
+        assert!(matches!(c.handle(Key::Quit), Choose::Leave));
+        assert!(matches!(c.handle(Key::Other), Choose::Idle));
     }
 
     #[test]
@@ -610,5 +666,16 @@ mod tests {
         assert_eq!(parse_keys(b"\x1b[B\x1b[C"), vec![Key::Down, Key::Right]);
         assert_eq!(parse_keys(b" "), vec![Key::Space]);
         assert_eq!(parse_keys(b"q"), vec![Key::Quit]);
+    }
+
+    #[test]
+    fn fragmented_csi_arrows_reassemble() {
+        let mut p = KeyParser::default();
+        assert!(p.feed(b"\x1b").is_empty());
+        assert!(p.feed(b"[").is_empty());
+        assert_eq!(p.feed(b"A"), vec![Key::Up]);
+        // 半截 CSI 后再跟完整按键：残段拼上，后续照常
+        assert!(p.feed(b"\x1b[").is_empty());
+        assert_eq!(p.feed(b"B w"), vec![Key::Down, Key::Space, Key::Up]);
     }
 }
