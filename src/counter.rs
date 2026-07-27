@@ -16,8 +16,6 @@ pub struct Stat {
     pub rank: u64,
     /// 这个人今天做了第几次
     pub visits: u64,
-    /// 当天做过这件事的人数
-    pub total: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -82,7 +80,6 @@ impl Book {
                 p
             }
         };
-        let total = record.total;
 
         // 日志写失败不该拦住信众，最多是重启后丢次数
         let _ = writeln!(
@@ -99,7 +96,6 @@ impl Book {
         Stat {
             rank: pilgrim.rank,
             visits: pilgrim.visits,
-            total,
         }
     }
 
@@ -256,14 +252,14 @@ mod tests {
 
         assert_eq!((a.rank, a.visits), (1, 1));
         assert_eq!((b.rank, b.visits), (2, 1));
-        // 号码认第一次的，次数往上加，总人数不变
-        assert_eq!((a2.rank, a2.visits, a2.total), (1, 2, 2));
+        // 号码认第一次的，次数往上加
+        assert_eq!((a2.rank, a2.visits), (1, 2));
 
         // 重启后号码和次数都还在
         drop(c);
         let mut c = Counter::open(&dir, "salt".into()).unwrap();
         let a3 = c.ring("1.1.1.1");
-        assert_eq!((a3.rank, a3.visits, a3.total), (1, 3, 2));
+        assert_eq!((a3.rank, a3.visits), (1, 3));
         let d = c.ring("3.3.3.3");
         assert_eq!((d.rank, d.visits), (3, 1));
 
@@ -280,7 +276,7 @@ mod tests {
         assert_eq!(c.ring("1.1.1.1").visits, 1);
         assert_eq!(c.ring("1.1.1.1").visits, 2);
         let burn = c.burn("1.1.1.1");
-        assert_eq!((burn.rank, burn.visits, burn.total), (1, 1, 1)); // 烧香从头算
+        assert_eq!((burn.rank, burn.visits), (1, 1)); // 烧香从头算
 
         // 各写各的文件，重启后各自还在
         drop(c);
@@ -327,7 +323,7 @@ mod tests {
 
         let mut c = Counter::open(&dir, "salt".into()).unwrap();
         let next = c.ring("1.1.1.1");
-        assert_eq!((next.rank, next.visits, next.total), (2, 1, 2));
+        assert_eq!((next.rank, next.visits), (2, 1));
 
         let _ = fs::remove_dir_all(&dir);
     }

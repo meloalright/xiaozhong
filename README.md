@@ -1,8 +1,8 @@
 # 小鐘寺 · a tiny bell temple 🔔🔥
 
 **終端裡的小鐘寺** —— walk into a little bell temple over SSH: strike the bell,
-step out to the garden to burn a stick of incense, and everyone else inside
-sees you move, live.
+burn incense in the garden, pet the temple cat, and everyone else inside sees
+you move, live.
 
 ```console
 $ ssh xiaozhongsi.sh
@@ -16,11 +16,11 @@ $ ssh xiaozhongsi.sh
 ++++++      ++++++
         🔥
 *,              *,
-*,          👧  *,
+*,      🐱👧    *,
 *,              *,
 *,*,*,      *,*,*,
 
-  🔥 香爐在前 · 按空格燒香
+  🐱 貓在側 · 按空格撸貓
   寺中此刻 2 人
 ```
 
@@ -31,8 +31,10 @@ key. Walk with the arrows — the view scrolls to follow you.
 Stand beside or below the **bell 🔔** and press Space to strike it: everyone
 inside hears it, a `\a` reaching every terminal. Walk out through the doorway
 into the garden and stand below the **censer 🔥** to burn a stick of incense.
-Bell and incense are counted separately, day by day. Leave through the garden's
-flower gate at the bottom or the openings on either side.
+Bell and incense are counted separately, day by day. A **cat 🐱** wanders the
+garden — stand next to it and press Space to give it a pet (just for fun, not
+counted); it holds still while you do. Leave through the garden's flower gate at
+the bottom or the openings on either side.
 
 The scenery is ASCII two characters wide so it lines up with the two-cell emoji
 standing on it. `curl xiaozhongsi.sh` just points you at SSH.
@@ -45,15 +47,16 @@ standing on it. `curl xiaozhongsi.sh` just points you at SSH.
 | arrows, `WASD` or `hjkl` | walk (the view follows you) |
 | `Space` beside/below the bell 🔔 | strike the bell — heard by all |
 | `Space` below the censer 🔥 | burn a stick of incense |
+| `Space` next to the cat 🐱 | pet it (just for fun) |
 | any key | rise again |
 | walk out a garden edge or gate | leave the temple |
 | `q` / `Ctrl-C` | leave immediately |
 
-Ringing happens in the temple and nowhere else. A connection that carries a
-command, or has no terminal attached, is turned away rather than counted — you
-have to come in and strike the bell yourself. Visitors without an SSH key can
-connect but cannot be told apart, so they are met with `ssh-keygen`
-instructions instead of being let in.
+Everything happens inside the temple. A trailing command is ignored — you still
+just connect in — but a connection with no terminal attached gets a nudge to use
+one, since the temple is interactive. Visitors without an SSH key can connect
+but cannot be told apart, so they are met with `ssh-keygen` instructions instead
+of being let in.
 
 ### 🧪 Test
 

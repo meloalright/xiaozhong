@@ -1,6 +1,6 @@
 name: showcase
 
-# 本地起一个真实实例，用固定的 TUI 脚本走一遍：进寺→烧香→撞钟→走到边缘→离寺
+# 本地起真实实例，演示：进寺→烧香→撞钟→离寺，以及各上海时段的 NPC 交互
 on:
   push:
     branches: [main]
@@ -18,29 +18,55 @@ jobs:
       - name: build
         run: cargo build
 
-      - name: 起一座本地小钟寺
-        run: |
-          mkdir -p /tmp/xzs-data
-          XIAOZHONGSI_DATA_DIR=/tmp/xzs-data HTTP_PORT=8080 SSH_PORT=2222 \
-            ./target/debug/xiaozhongsi > /tmp/xzs.log 2>&1 &
-          echo $! > /tmp/xzs.pid
-          echo "等 SSH 端口起来…"
-          timeout 25 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.5; done'
-
-      - name: 备一把香客公钥
-        run: ssh-keygen -t ed25519 -N '' -f /tmp/ck -q
-
       - name: 走一遍 · 选头像 / 烧香 / 撞钟 / 离寺
         run: |
+          # 钉在午休时段(FAKE_MIN=750，无 NPC)，走位不被值守的人挡着，结果稳定
+          mkdir -p /tmp/main
+          XIAOZHONGSI_DATA_DIR=/tmp/main HTTP_PORT=8080 SSH_PORT=2222 XIAOZHONGSI_FAKE_MIN=750 \
+            ./target/debug/xiaozhongsi > /tmp/main.log 2>&1 &
+          echo $! > /tmp/srv.pid
+          echo "等 SSH 端口起来…"
+          timeout 25 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.5; done'
+          ssh-keygen -t ed25519 -N '' -f /tmp/ck -q
           python3 ci/drive.py --host 127.0.0.1 --port 2222 --key /tmp/ck --pick 3 \
             --steps up,space,enter,left,up,up,up,up,up,up,up,up,space,enter,left,left,left,left \
             --expect 先擇一副面容 --expect 🧛 \
             --expect 香爐在前 --expect 位燒香 \
             --expect 鐘在側 --expect 位撞鐘 \
             --expect 鐘聲遠去
+          kill "$(cat /tmp/srv.pid)" 2>/dev/null || true
 
-      - name: 关寺 & 看日志
-        if: always()
+      - name: 各时段 NPC 交互（上海时间 · 用 FAKE_MIN 钉死时刻）
         run: |
-          [ -f /tmp/xzs.pid ] && kill "$(cat /tmp/xzs.pid)" 2>/dev/null || true
-          echo '--- server log ---'; cat /tmp/xzs.log || true
+          # seg: $1=当天分钟  $2=标题  $3=按键序列  $4..=期望子串（非致命，主要为了 show 画面）
+          seg() {
+            local fm="$1" title="$2" steps="$3"; shift 3
+            printf '::group::%s  ·  視作 %02d:%02d\n' "$title" $((fm/60)) $((fm%60))
+            fuser -k -n tcp 2222 >/dev/null 2>&1 || true; sleep 1
+            rm -rf "/tmp/d$fm"
+            ssh-keygen -t ed25519 -N '' -f "/tmp/k$fm" -q 2>/dev/null || true
+            XIAOZHONGSI_DATA_DIR="/tmp/d$fm" HTTP_PORT=8080 SSH_PORT=2222 XIAOZHONGSI_FAKE_MIN=$fm \
+              ./target/debug/xiaozhongsi > "/tmp/s$fm.log" 2>&1 &
+            local pid=$!
+            timeout 20 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.4; done' || true
+            local exp=(); local e; for e in "$@"; do exp+=(--expect "$e"); done
+            python3 ci/drive.py --host 127.0.0.1 --port 2222 --key "/tmp/k$fm" --settle 0.5 \
+              --steps "$steps" "${exp[@]}" || echo "（本段未全部命中，看上方画面即可）"
+            kill "$pid" 2>/dev/null || true
+            echo '::endgroup::'
+          }
+          T='down,down,down,down,left,down,down,space'  # 下到下院、树旁大爷
+          Tw='down,down,down,down,left,down,down'        # 同上但不搭话（看空位）
+          H='up,left,up,up,up,up,up,space'               # 上到庙堂、大爷旁
+          V='left,space'                                 # 广场里志愿者旁
+          seg 480  "① 06:00–10:00 大爺·樹下·早問候"   "$T"  🙋 早啊
+          seg 660  "② 10:00–12:00 大爺·樹下·問午飯"   "$T"  🙋 中午
+          seg 750  "③ 12:00–14:00 午休·下院沒人"       "$Tw" 🌳
+          seg 900  "④ 14:00–16:00 大爺·廟堂·下午忙"   "$H"  🙋 下午
+          seg 1020 "⑤ 16:00–18:00 大爺·廟堂·快下班"   "$H"  🙋 下班
+          seg 1140 "⑥ 18:00–21:30 志願者·廣場"         "$V"  👰 志願者
+          seg 1350 "⑦ 21:30–06:00 深夜·沒人"           left  寺中此刻
+
+      - name: 收尾
+        if: always()
+        run: fuser -k -n tcp 2222 8080 >/dev/null 2>&1 || true

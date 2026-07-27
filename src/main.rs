@@ -34,20 +34,25 @@ const NO_KEY: &str = "\
 \r\n\
 一路 Enter 即可。鑄畢再來 · ssh xiaozhongsi.sh 便能撞鐘。";
 
-/// 带命令、或没有终端的连接：香得自己进廟上，不能隔空代拜
+/// 没有分配终端（PTY）的连接：交互寺庙进不来，提示用可交互的终端
 const NEED_TTY: &str = "\
-寺曰：心誠須親至 · 隔空代撞不算數 🔔\r\n\
+寺曰：進寺須有終端 · 隔著管道進不來 🔔\r\n\
 \r\n\
-請在終端直接連入 · 不要附帶命令：\r\n\
+請在終端直接連入：\r\n\
 \r\n\
     ssh xiaozhongsi.sh";
 
-/// 离廟时清屏、恢复光标
-const LEAVE: &str = "\x1b[2J\x1b[H\x1b[?25h鐘聲遠去 · 慢走 🔔\r\n";
+/// 离廟时切回主屏（备用屏用完退掉，不在终端历史里留痕）、恢复光标，再道别
+const LEAVE: &str = "\x1b[?25h\x1b[?1049l鐘聲遠去 · 慢走 🔔\r\n";
+
+/// 寺庙的猫每隔多久挪一步
+const CAT_STEP: std::time::Duration = std::time::Duration::from_secs(3);
+/// NPC 多久对一次表（到点出现/消失）
+const NPC_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 每次进寺最多待一分钟，时辰一到自动送客——免得有人长占席位
 const SESSION_CAP: std::time::Duration = std::time::Duration::from_secs(60);
-const TIME_UP: &str = "\x1b[2J\x1b[H\x1b[?25h一炷香的緣分已滿 · 鐘樓暫別 · 慢走 🔔\r\n";
+const TIME_UP: &str = "\x1b[?25h\x1b[?1049l一炷香的緣分已滿 · 鐘樓暫別 · 慢走 🔔\r\n";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -79,6 +84,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let world = Arc::new(Mutex::new(World::default()));
     let (tick, _) = tokio::sync::broadcast::channel::<bool>(64);
     let next_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+    // 寺庙的猫在广场自己溜达：每隔几秒挪一步，挪动了就让全场重画
+    {
+        let world = Arc::clone(&world);
+        let tick = tick.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(CAT_STEP).await;
+                let moved = world.lock().unwrap_or_else(|e| e.into_inner()).wander_cat();
+                if moved {
+                    let _ = tick.send(false);
+                }
+            }
+        });
+    }
+
+    // NPC（安保大爷/志愿者）按上海时间到点出现/消失：先对一次表，之后每 30 秒对一次，变了才广播
+    let m0 = shanghai_min_of_day();
+    println!(
+        "[小鐘寺] NPC 依上海時 · 此刻視作 {:02}:{:02}",
+        m0 / 60,
+        m0 % 60
+    );
+    world
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .update_npc(m0);
+    {
+        let world = Arc::clone(&world);
+        let tick = tick.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(NPC_REFRESH).await;
+                let changed = world
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .update_npc(shanghai_min_of_day());
+                if changed {
+                    let _ = tick.send(false);
+                }
+            }
+        });
+    }
 
     let temple = Temple {
         counter: Arc::clone(&counter),
@@ -154,6 +202,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = t.await;
     }
     Ok(())
+}
+
+/// 上海时间（UTC+8）当天已过的分钟数 0..1440。
+/// 调试：环境变量 XIAOZHONGSI_FAKE_MIN 直接钉死「当天第几分钟」（0–1439），
+/// 用 `fly secrets set XIAOZHONGSI_FAKE_MIN=480` 即可当作 08:00，方便调 NPC 的时段。
+/// 不设则按真实上海时间。
+fn shanghai_min_of_day() -> u32 {
+    if let Some(m) = std::env::var("XIAOZHONGSI_FAKE_MIN")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+    {
+        return m % 1440;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        + 8 * 3600;
+    ((secs % 86_400) / 60) as u32
 }
 
 fn env_ports(name: &str, default: &str) -> Vec<u16> {
@@ -362,14 +429,20 @@ impl Handler for Temple {
         }
     }
 
-    /// `ssh xiaozhongsi.sh <命令>` 不再代撞——钟得自己进寺敲
+    /// `ssh xiaozhongsi.sh <命令>` 也照常连入：命令一律忽略，不代撞、不谢客，
+    /// 和不带命令一样——有 PTY 就进寺，没 PTY 才提示需要终端。
     async fn exec_request(
         &mut self,
         channel: ChannelId,
         _data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.turn_away(channel, session)
+        session.channel_success(channel)?;
+        if self.has_pty && self.fingerprint.is_some() {
+            self.enter_space(channel, session)
+        } else {
+            self.turn_away(channel, session)
+        }
     }
 
     /// 交互空间的按键都从这里进来
@@ -437,6 +510,18 @@ impl Handler for Temple {
                         .set_blessing(self.id, blessing);
                     self.push(channel, session, false)?;
                 }
+                Action::Pet => {
+                    // 撸猫：只给本人一句文案，不入任何簿子、不计数
+                    self.world
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .set_blessing(self.id, PET_LINE.to_string());
+                    self.push(channel, session, false)?;
+                }
+                Action::Talk => {
+                    // 搭话：对话文案已在 World::handle 里设好，这里只重画
+                    self.push(channel, session, false)?;
+                }
                 Action::Leave => {
                     self.world
                         .lock()
@@ -462,6 +547,10 @@ impl Temple {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), russh::Error> {
+        // 切到备用屏幕：进寺这段独占一块屏，离寺后自动还原用户原来的终端，
+        // 不把寺庙的画面留进滚动历史（和 vim / less / htop 一个道理）。
+        session.data(channel, b"\x1b[?1049h".to_vec())?;
+
         let known = self.pilgrim_id().and_then(|id| {
             self.avatars
                 .lock()
@@ -597,12 +686,9 @@ impl Temple {
         let mut c = self.counter.lock().unwrap_or_else(|e| e.into_inner());
         let s = c.ring(&fp);
         if s.visits > 1 {
-            format!(
-                "你今天第 {} 次撞鐘 · 今天共 {} 位撞過鐘 🔔",
-                s.visits, s.total
-            )
+            format!("你今天第 {} 次撞鐘", s.visits)
         } else {
-            format!("你是今天第 {} 位撞鐘 🔔", s.rank)
+            format!("你是今天第 {} 位撞鐘", s.rank)
         }
     }
 
@@ -614,12 +700,9 @@ impl Temple {
         let mut c = self.counter.lock().unwrap_or_else(|e| e.into_inner());
         let s = c.burn(&fp);
         if s.visits > 1 {
-            format!(
-                "你今天第 {} 炷香 · 今天共 {} 位燒過香 🔥",
-                s.visits, s.total
-            )
+            format!("你今天第 {} 炷香", s.visits)
         } else {
-            format!("你是今天第 {} 位燒香 🔥", s.rank)
+            format!("你是今天第 {} 位燒香", s.rank)
         }
     }
 
@@ -637,3 +720,6 @@ impl Temple {
         Ok(())
     }
 }
+
+/// 撸猫的文案（只给本人看，不计数）
+const PET_LINE: &str = "你摸了寺裡的貓";
