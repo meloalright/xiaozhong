@@ -94,6 +94,36 @@ jobs:
             || echo "（本段未全部命中，看上方畫面即可：讀信後那封 📨 便消失）"
           kill "$pid" 2>/dev/null || true
 
+      - name: 天色 × 时辰（伪造天气 · 大钟寺实况本由 Open-Meteo 驱动）
+        run: |
+          # 线上天色由寺进程每 30 分钟拉大钟寺天气得来；这里用 XIAOZHONGSI_FAKE_WEATHER
+          # ("is_day,code,cloud,rain") 走同一套映射钉死，配不同 FAKE_MIN 展示各种天色 × 时辰。
+          wseg() {
+            local fm="$1" wx="$2" want="$3" title="$4"
+            printf '::group::%s  ·  視作 %02d:%02d\n' "$title" $((fm/60)) $((fm%60))
+            fuser -k -n tcp 2222 >/dev/null 2>&1 || true; sleep 1
+            rm -rf "/tmp/wx$fm"
+            ssh-keygen -t ed25519 -N '' -f "/tmp/wxk$fm" -q 2>/dev/null || true
+            XIAOZHONGSI_DATA_DIR="/tmp/wx$fm" HTTP_PORT=8080 SSH_PORT=2222 \
+              XIAOZHONGSI_FAKE_MIN=$fm XIAOZHONGSI_FAKE_WEATHER="$wx" \
+              ./target/debug/xiaozhongsi > "/tmp/wx$fm.log" 2>&1 &
+            local pid=$!
+            timeout 20 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.4; done' || true
+            python3 ci/drive.py --host 127.0.0.1 --port 2222 --key "/tmp/wxk$fm" --settle 0.5 \
+              --steps left --expect "$want" \
+              || echo "（未命中，看上方状态栏那行天色 × 时辰即可）"
+            kill "$pid" 2>/dev/null || true
+            echo '::endgroup::'
+          }
+          #      FAKE_MIN  is_day,code,cloud,rain   期望图标   标题
+          wseg 360   "1,0,10,0"    "☀️"  "① 06:00 晴 · 白天"
+          wseg 750   "1,2,50,0"    "⛅"  "② 12:30 多云"
+          wseg 900   "1,3,90,0"    "☁️"  "③ 15:00 阴"
+          wseg 960   "1,61,90,2"   "🌧️"  "④ 16:00 雨"
+          wseg 400   "1,45,100,0"  "🌫️"  "⑤ 06:40 雾"
+          wseg 1200  "0,95,90,5"   "⛈️"  "⑥ 20:00 夜·雷雨"
+          wseg 1380  "0,0,10,0"    "🌙"  "⑦ 23:00 晴夜"
+
       - name: 收尾
         if: always()
         run: fuser -k -n tcp 2222 8080 >/dev/null 2>&1 || true

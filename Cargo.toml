@@ -11,6 +11,8 @@ license = "MIT"
 russh = "0.62"
 rand = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+# 天气：寺自己每 30 分钟拉一次大钟寺天色。阻塞式、轻量，放 spawn_blocking 里跑
+ureq = "2"
 
 [profile.release]
 opt-level = "z"

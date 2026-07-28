@@ -40,9 +40,19 @@ next to it for a line). Someone is usually on duty by Shanghai time — a **guar
 🙋** through the day (out by the tree, in the hall in the afternoon), a **night
 volunteer 💇** — stand next to them and press Space to talk; they come and go
 with the hours, and nobody keeps watch at noon or deep in the night. The status
-line marks the hour with the traditional twelve *shichen* (`☀️  午時` /
-`🌙  子時`). Leave through the courtyard's bottom gate or the openings on either
-side.
+line marks the hour with the traditional twelve *shichen* (the name — 午時,
+子時, … — always shown; the icon before it follows the weather). Leave through
+the courtyard's bottom gate or the openings on either side.
+
+The status-line icon follows the **real weather** at the Big Bell Temple
+(大钟寺) in Haidian, Beijing — the real-world namesake of this little temple.
+Every 30 minutes the server itself polls [Open-Meteo](https://open-meteo.com/)
+(no key, non-commercial) and swaps the icon: `☀️` clear, `⛅` partly cloudy,
+`☁️` overcast, `🌧️` rain, `🌨️` snow, `⛈️` thunder, `🌫️` fog, `🌙` clear
+night — day/night comes from the sun, not the clock. The shichen name stays.
+The fetch runs off the game path (its own task, on a blocking thread, holding
+no lock); if it can't reach the weather for an hour the icon falls back to
+`⚡` — as if the whole planet got struck by lightning and took the API down.
 
 Each day at 06:00 Shanghai time a **letter 📨** drops on a random patch between
 the spawn point and the tree. It blocks your way; stand next to it and press

@@ -49,6 +49,13 @@ const LEAVE: &str = "\x1b[?25h\x1b[?1049l鐘聲遠去 · 慢走 🔔\r\n";
 const CAT_STEP: std::time::Duration = std::time::Duration::from_secs(3);
 /// NPC 多久对一次表（到点出现/消失）
 const NPC_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
+/// 天气多久拉一次（大钟寺天色，Open-Meteo）
+const WEATHER_REFRESH: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// 连续拉不到多久就把天色交回时辰（1 小时兜底）
+const WEATHER_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// 大钟寺古钟博物馆（北京海淀，「小鐘寺」的现实原型）的经纬度
+const WEATHER_LAT: &str = "39.9680";
+const WEATHER_LON: &str = "116.3317";
 
 /// 每次进寺最多待一分钟，时辰一到自动送客——免得有人长占席位
 const SESSION_CAP: std::time::Duration = std::time::Duration::from_secs(60);
@@ -136,6 +143,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
+    }
+
+    // 天气：寺自己每 30 分钟拉一次大钟寺的天色（Open-Meteo），据此换状态栏图标。
+    // 独立任务，网络请求丢进 spawn_blocking、且拉取时不持 World 锁，绝不阻塞游戏。
+    // 调试（设了 FAKE_MIN）时关掉，状态栏走时辰，保证 showcase 等场景确定可复现。
+    if std::env::var("XIAOZHONGSI_FAKE_MIN").is_err() {
+        let world = Arc::clone(&world);
+        let tick = tick.clone();
+        tokio::spawn(async move {
+            let mut last_ok = std::time::Instant::now();
+            let mut first = true;
+            loop {
+                if !first {
+                    tokio::time::sleep(WEATHER_REFRESH).await;
+                }
+                first = false;
+                // 拉取可能耗时数秒——此时不碰锁
+                let icon = tokio::task::spawn_blocking(fetch_weather_icon)
+                    .await
+                    .unwrap_or(None);
+                if let Some(i) = icon {
+                    println!("[小鐘寺] 天氣 · 大鐘寺此刻 {i}");
+                }
+                // 只在写入的一瞬握锁
+                let changed = {
+                    let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
+                    match icon {
+                        Some(i) => {
+                            last_ok = std::time::Instant::now();
+                            w.set_weather(Some(i))
+                        }
+                        // 拉不到：先保持上次天色；连续失败超 TTL 才回落到时辰
+                        None if last_ok.elapsed() > WEATHER_TTL => w.set_weather(None),
+                        None => false,
+                    }
+                };
+                if changed {
+                    let _ = tick.send(false);
+                }
+            }
+        });
+        println!("[小鐘寺] 天氣 · 每 30 分鐘拉大鐘寺天色（Open-Meteo）");
+    } else {
+        println!("[小鐘寺] 天氣 · 調試(FAKE_MIN)下關閉，狀態欄走時辰");
+    }
+
+    // 调试：XIAOZHONGSI_FAKE_WEATHER="is_day,code,cloud,rain" 直接钉死天色，
+    // 走真实映射（如 "1,3,90,0"=白天阴 ☁️、"0,95,90,5"=夜雷雨 ⛈️）。给 showcase 用。
+    if let Some(icon) = std::env::var("XIAOZHONGSI_FAKE_WEATHER")
+        .ok()
+        .and_then(|s| parse_fake_weather(&s))
+    {
+        world
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_weather(Some(icon));
+        println!("[小鐘寺] 天氣 · 調試偽造 {icon}");
     }
 
     let temple = Temple {
@@ -231,6 +295,55 @@ fn shanghai_min_of_day() -> u32 {
         .unwrap_or(0)
         + 8 * 3600;
     ((secs % 86_400) / 60) as u32
+}
+
+/// 阻塞式拉一次大钟寺天气，映射成状态栏天色图标。放 spawn_blocking 里跑。
+/// 任何环节出错都回 None（保持上次天色 / 超时回落时辰）。
+fn fetch_weather_icon() -> Option<&'static str> {
+    let url = format!(
+        "https://api.open-meteo.com/v1/forecast?latitude={WEATHER_LAT}&longitude={WEATHER_LON}\
+         &current=weather_code,cloud_cover,is_day,rain&timezone=Asia%2FShanghai"
+    );
+    let resp = match ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[小鐘寺] 天氣 · 拉取出错: {e}");
+            return None;
+        }
+    };
+    let body = resp.into_string().ok()?;
+    // 只看 "current":{...} 那段——"current_units" 在它前面，值是字符串（如 "wmo code"），
+    // 直接全局搜数字会先撞上 units 里的字符串而解析失败。
+    let cur = body.split("\"current\":{").nth(1).unwrap_or(&body);
+    let code = json_num(cur, "weather_code")? as u32;
+    let cloud = json_num(cur, "cloud_cover")? as u32;
+    let is_day = json_num(cur, "is_day")? as u32 == 1;
+    let rain = json_num(cur, "rain").unwrap_or(0.0);
+    Some(space::weather_icon(is_day, code, cloud, rain))
+}
+
+/// 调试用：把 "is_day,code,cloud,rain" 走真实映射得到天色图标。
+fn parse_fake_weather(spec: &str) -> Option<&'static str> {
+    let mut it = spec.split(',');
+    let is_day = it.next()?.trim().parse::<u32>().ok()? == 1;
+    let code = it.next()?.trim().parse::<u32>().ok()?;
+    let cloud = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(0);
+    let rain = it.next().and_then(|x| x.trim().parse().ok()).unwrap_or(0.0);
+    Some(space::weather_icon(is_day, code, cloud, rain))
+}
+
+/// 从 Open-Meteo 那种扁平 JSON 里抠出 `"key":<数字>`。字段稳定，省掉 JSON 依赖。
+fn json_num(body: &str, key: &str) -> Option<f64> {
+    let pat = format!("\"{key}\":");
+    let start = body.find(&pat)? + pat.len();
+    let rest = &body[start..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
 }
 
 /// 上海时间（UTC+8）算「今天」是纪元以来第几天，用来分辨新的一天投新信。

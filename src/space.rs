@@ -196,6 +196,8 @@ pub struct World {
     letter_text: Option<String>,
     /// 已在纪元第几天投过信，保证一天只投一封（读完当天也不再冒）。
     letter_day: Option<i64>,
+    /// 大钟寺此刻的天色图标，由天气任务写入；None 则回落到时辰 ☀️/🌙。
+    weather_icon: Option<&'static str>,
 }
 
 impl Default for World {
@@ -208,6 +210,7 @@ impl Default for World {
             letter: None,
             letter_text: None,
             letter_day: None,
+            weather_icon: None,
         }
     }
 }
@@ -243,6 +246,27 @@ impl World {
                 blessing: None,
             },
         );
+    }
+
+    /// 天气任务写入此刻天色图标（None = 回落到时辰）。变了返回 true（好广播重画）。
+    pub fn set_weather(&mut self, icon: Option<&'static str>) -> bool {
+        if self.weather_icon != icon {
+            self.weather_icon = icon;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 状态栏那行：图标用天气（有就用），名字始终是时辰。
+    fn status_mark(&self) -> String {
+        match self.weather_icon {
+            Some(icon) => {
+                let idx = shichen_idx(self.min_of_day);
+                format!("{}  {}時", icon, SHICHEN[idx])
+            }
+            None => sky_mark(self.min_of_day),
+        }
     }
 
     /// 注入信的内容（来自环境变量）。空字符串则关闭「每日一信」。
@@ -617,11 +641,8 @@ impl World {
         };
 
         let mut out = String::from("\x1b[2J\x1b[H\x1b[?25l\r\n");
-        // 时辰固定钉在视窗正上方，空一行再接画面
-        out.push_str(&format!(
-            "  \x1b[2m{}\x1b[0m\r\n\r\n",
-            sky_mark(self.min_of_day)
-        ));
+        // 时辰固定钉在视窗正上方，空一行再接画面（图标随大钟寺天气）
+        out.push_str(&format!("  \x1b[2m{}\x1b[0m\r\n\r\n", self.status_mark()));
         for line in &world[top..(top + VIEW_H).min(total)] {
             out.push_str(line);
             out.push_str("\r\n");
@@ -669,17 +690,45 @@ const SHICHEN: [&str; 12] = [
     "子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥",
 ];
 
-/// 状态栏的天色 + 时辰：白天 ☀️、夜里 🌙，配上当时的十二时辰名（如「☀️  午時」）。
-/// 只出现在状态栏那行（自由文本、不参与地图对齐）。
+/// 当前是第几个时辰（0=子…），供状态栏取时辰名用。
+fn shichen_idx(min_of_day: u32) -> usize {
+    ((min_of_day / 60).div_ceil(2) % 12) as usize
+}
+
+/// 拿不到天气时的兜底图标：⚡ —— 大概整个地球都被雷劈了，所以查询失败。
+/// 单码位、默认彩色，且状态栏是自由文本行，怎么放都安全。
+const FALLBACK_ICON: &str = "⚡";
+
+/// 没有天气数据时的状态栏：图标一律 ⚡，名字仍是当时的时辰。
 fn sky_mark(min_of_day: u32) -> String {
-    let idx = ((min_of_day / 60).div_ceil(2) % 12) as usize;
-    // 卯～酉時（约 05:00–19:00）算白天
-    let icon = if (3..=9).contains(&idx) {
-        "☀️"
+    format!("{}  {}時", FALLBACK_ICON, SHICHEN[shichen_idx(min_of_day)])
+}
+
+/// 把 Open-Meteo 的原始字段映射成状态栏那行的天色图标。
+/// 天气优先（雷雨/雪/雨/雾不分昼夜），其次按 is_day 定晴/多云/阴与昼夜。
+/// 只放在状态栏那一行（自由文本，多码位 VS16 emoji 不参与网格对齐，安全）。
+pub fn weather_icon(is_day: bool, code: u32, cloud: u32, rain: f64) -> &'static str {
+    if (95..=99).contains(&code) {
+        "⛈️" // 雷雨
+    } else if (71..=77).contains(&code) || (85..=86).contains(&code) {
+        "🌨️" // 雪
+    } else if rain > 0.0 || (51..=67).contains(&code) || (80..=82).contains(&code) {
+        "🌧️" // 雨（含毛毛雨、阵雨）
+    } else if code == 45 || code == 48 {
+        "🌫️" // 雾
+    } else if is_day {
+        if cloud >= 80 || code == 3 {
+            "☁️" // 阴
+        } else if code == 2 || cloud >= 40 {
+            "⛅" // 多云
+        } else {
+            "☀️" // 晴
+        }
+    } else if cloud >= 80 || code == 3 {
+        "☁️" // 阴夜
     } else {
-        "🌙"
-    };
-    format!("{}  {}時", icon, SHICHEN[idx])
+        "🌙" // 晴夜
+    }
 }
 
 /// 站在钟的左边、右边或正下方那格，就能敲钟
@@ -1215,18 +1264,53 @@ mod tests {
     }
 
     #[test]
+    fn weather_icon_maps_conditions() {
+        // 天气优先，不分昼夜
+        assert_eq!(weather_icon(true, 95, 10, 0.0), "⛈️", "雷雨");
+        assert_eq!(weather_icon(false, 71, 90, 0.0), "🌨️", "雪");
+        assert_eq!(weather_icon(true, 0, 0, 0.3), "🌧️", "有雨量就是雨");
+        assert_eq!(weather_icon(true, 51, 80, 0.0), "🌧️", "毛毛雨算雨");
+        assert_eq!(weather_icon(true, 45, 100, 0.0), "🌫️", "雾");
+        // 白天晴/多云/阴
+        assert_eq!(weather_icon(true, 0, 10, 0.0), "☀️", "白天晴");
+        assert_eq!(weather_icon(true, 2, 50, 0.0), "⛅", "白天多云");
+        assert_eq!(weather_icon(true, 3, 90, 0.0), "☁️", "白天阴");
+        // 夜里
+        assert_eq!(weather_icon(false, 0, 10, 0.0), "🌙", "晴夜");
+        assert_eq!(weather_icon(false, 3, 90, 0.0), "☁️", "阴夜");
+    }
+
+    #[test]
+    fn weather_overrides_fallback_icon_but_keeps_name() {
+        let mut w = World::default();
+        w.join(1, 0);
+        w.update_npc(12 * 60); // 午時
+                               // 无天气：兜底 ⚡
+        assert!(w.render(1).contains("⚡  午時"));
+        // 天气任务写入雨：图标变 🌧️，时辰名保留
+        assert!(w.set_weather(Some("🌧️")));
+        let s = w.render(1);
+        assert!(s.contains("🌧️  午時"), "图标随天气、名字仍是时辰");
+        assert!(!s.contains("⚡  午時"));
+        // 天气丢失回落：又变回 ⚡
+        assert!(w.set_weather(None));
+        assert!(w.render(1).contains("⚡  午時"));
+    }
+
+    #[test]
     fn sky_mark_by_time() {
         let m = |h: u32| h * 60;
-        assert_eq!(sky_mark(m(12)), "☀️  午時"); // 白天
-        assert_eq!(sky_mark(m(5)), "☀️  卯時"); // 卯時算白天
-        assert_eq!(sky_mark(m(23)), "🌙  子時"); // 夜
-        assert_eq!(sky_mark(m(20)), "🌙  戌時"); // 戌時算夜
-                                                 // 时辰钉在视窗上方，人数在底部另起一行
+        // 没有天气数据时兜底成 ⚡，名字仍是各自时辰
+        assert_eq!(sky_mark(m(12)), "⚡  午時");
+        assert_eq!(sky_mark(m(5)), "⚡  卯時");
+        assert_eq!(sky_mark(m(23)), "⚡  子時");
+        assert_eq!(sky_mark(m(20)), "⚡  戌時");
+        // 时辰钉在视窗上方，人数在底部另起一行
         let mut w = World::default();
         w.join(1, 0);
         w.update_npc(m(12));
         let screen = w.render(1);
-        assert!(screen.contains("☀️  午時"));
+        assert!(screen.contains("⚡  午時"), "无天气时兜底 ⚡");
         assert!(screen.contains("寺中此刻 1 人"));
     }
 
