@@ -54,11 +54,21 @@ const TREE_AT: (usize, usize) = (14, 4);
 const TREE_LINE: &str = "這是寺裡的一棵老樹";
 /// 安保大爷 / 志愿者的头像（都是单码位）
 const GUARD: &str = "🙋";
-const VOLUNTEER: &str = "👰";
+const VOLUNTEER: &str = "💇";
 /// NPC 的几个固定落点
 const GUARD_TREE: (usize, usize) = (15, 4); // 平时在下院、树下
 const GUARD_HALL: (usize, usize) = (3, 2); // 14–16 点巡到庙堂
 const VOLUNTEER_AT: (usize, usize) = (9, 2); // 夜里的志愿者在广场
+/// 深夜 0–2 点，钟右侧飘着一只幽灵，能搭话但只吐省略号
+const GHOST: &str = "👻";
+const GHOST_AT: (usize, usize) = (0, 5); // 钟 (0,4) 的右邻
+/// 每天 06:00 在出生点到树之间随机落一封信，挡路、可拆阅，读完就没。
+/// 单码位 📨（✉️ 带变体符是 2 码位、会撑歪网格，不能用）。
+const LETTER: &str = "📨";
+/// 信落在哪几排：出生点那排到树那排之间（含两端）
+const LETTER_ROWS: std::ops::RangeInclusive<usize> = START_AT.0..=TREE_AT.0; // 9..=14
+/// 每天几点开始有信
+const LETTER_HOUR: u32 = 6;
 /// 空庭：地面留白，只有星光、钟和人
 const FLOOR: &str = "  ";
 /// 窗棂格子墙
@@ -116,8 +126,16 @@ struct Pilgrim {
     petting: bool,
     /// 正在和 NPC 搭话
     talking: bool,
-    /// 撞钟/烧香/撸猫/搭话后要显示给本人的那句话
+    /// 正在拆阅那封信
+    reading: bool,
+    /// 撞钟/烧香/撸猫/搭话/读信后要显示给本人的那句话
     blessing: Option<String>,
+}
+
+/// 每天 06:00 冒出来的一封信。落在随机空地，挡路；有人读完起身就消失。
+#[derive(Clone, PartialEq, Debug)]
+struct Letter {
+    at: (usize, usize),
 }
 
 /// 值守的 NPC：任意时刻最多一个（安保大爷或志愿者），按上海时间决定。
@@ -142,14 +160,20 @@ fn npc_for(min_of_day: u32) -> Option<Npc> {
         Some(Npc {
             at: VOLUNTEER_AT,
             glyph: VOLUNTEER,
-            line: "我就是個來義務幫忙的志願者 · 這麼晚了。",
+            line: "這個點兒沒什麼人，我這志願者也落得自在。",
         })
     };
     match min_of_day / 60 {
+        // 0–2 点：钟右侧的幽灵，搭话只吐省略号
+        0..=1 => Some(Npc {
+            at: GHOST_AT,
+            glyph: GHOST,
+            line: "......",
+        }),
         6..=9 => guard(GUARD_TREE, "早啊，這麼早就來啦？"),
         10..=11 => guard(GUARD_TREE, "快晌午了，中午吃點啥好？"),
         // 12–13：午休，无人
-        14..=15 => guard(GUARD_HALL, "下午事兒多，我在殿裏轉轉。"),
+        14..=15 => guard(GUARD_HALL, "趁人少，我巡一圈，你自便。"),
         16..=17 => guard(GUARD_HALL, "再撐會兒就下班嘍。"),
         18..=20 => volunteer(),
         21 if min_of_day < 21 * 60 + 30 => volunteer(),
@@ -164,6 +188,14 @@ pub struct World {
     cat_at: (usize, usize),
     /// 此刻值守的 NPC，按上海时间刷新。
     npc: Option<Npc>,
+    /// 上海时间「当天第几分钟」，用来在状态栏报时辰。随 update_npc 刷新。
+    min_of_day: u32,
+    /// 此刻场上那封信（没有就 None）。
+    letter: Option<Letter>,
+    /// 信的内容，由环境变量注入；空则整个功能关闭。
+    letter_text: Option<String>,
+    /// 已在纪元第几天投过信，保证一天只投一封（读完当天也不再冒）。
+    letter_day: Option<i64>,
 }
 
 impl Default for World {
@@ -172,6 +204,10 @@ impl Default for World {
             pilgrims: HashMap::new(),
             cat_at: CAT_START,
             npc: None,
+            min_of_day: 0,
+            letter: None,
+            letter_text: None,
+            letter_day: None,
         }
     }
 }
@@ -203,13 +239,73 @@ impl World {
                 burning: false,
                 petting: false,
                 talking: false,
+                reading: false,
                 blessing: None,
             },
         );
     }
 
-    /// 按上海时间刷新值守 NPC；变了返回 true（好决定要不要广播重画）。
+    /// 注入信的内容（来自环境变量）。空字符串则关闭「每日一信」。
+    pub fn set_letter_text(&mut self, text: String) {
+        self.letter_text = if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        };
+    }
+
+    /// 每天 06:00 起投一封信，当天只投一次。投下了返回 true（好广播重画）。
+    /// 位置从出生点到树之间的空地里随机挑一格。day 是纪元第几天，用来分辨新的一天。
+    pub fn tick_letter(&mut self, min_of_day: u32, day: i64) -> bool {
+        // 没配内容就没有信
+        if self.letter_text.as_deref().unwrap_or("").is_empty() {
+            return false;
+        }
+        if min_of_day >= LETTER_HOUR * 60 && self.letter_day != Some(day) {
+            if let Some(at) = self.random_letter_cell() {
+                self.letter = Some(Letter { at });
+                self.letter_day = Some(day);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 出生点到树之间的空地里随机挑一格放信（避开人、猫、NPC、挡路块）。
+    fn random_letter_cell(&self) -> Option<(usize, usize)> {
+        let mut cells: Vec<(usize, usize)> = Vec::new();
+        for r in LETTER_ROWS {
+            for (c, &tile) in MAP[r].iter().enumerate() {
+                if tile == '.'
+                    && !self.occupied((r, c))
+                    && (r, c) != self.cat_at
+                    && !self.is_npc((r, c))
+                {
+                    cells.push((r, c));
+                }
+            }
+        }
+        if cells.is_empty() {
+            None
+        } else {
+            Some(cells[rand::random_range(0..cells.len())])
+        }
+    }
+
+    fn is_letter(&self, at: (usize, usize)) -> bool {
+        self.letter.as_ref().is_some_and(|l| l.at == at)
+    }
+
+    /// 站在信的上下左右相邻一格，就能拆阅
+    fn letter_near(&self, at: (usize, usize)) -> bool {
+        self.letter
+            .as_ref()
+            .is_some_and(|l| at.0.abs_diff(l.at.0) + at.1.abs_diff(l.at.1) == 1)
+    }
+
+    /// 按上海时间刷新值守 NPC 与时辰；NPC 变了返回 true（好决定要不要广播重画）。
     pub fn update_npc(&mut self, min_of_day: u32) -> bool {
+        self.min_of_day = min_of_day;
         let next = npc_for(min_of_day);
         if next != self.npc {
             self.npc = next;
@@ -226,7 +322,11 @@ impl World {
     /// 落脚点：优先 START_AT，被占了就找离它最近的空地。
     /// 全都占满（几乎不会）才退回 START_AT 叠一格。
     fn spawn_cell(&self) -> (usize, usize) {
-        if !self.occupied(START_AT) && START_AT != self.cat_at && !self.is_npc(START_AT) {
+        if !self.occupied(START_AT)
+            && START_AT != self.cat_at
+            && !self.is_npc(START_AT)
+            && !self.is_letter(START_AT)
+        {
             return START_AT;
         }
         let mut best: Option<((usize, usize), usize)> = None;
@@ -236,6 +336,7 @@ impl World {
                     || self.occupied((r, c))
                     || (r, c) == self.cat_at
                     || self.is_npc((r, c))
+                    || self.is_letter((r, c))
                 {
                     continue;
                 }
@@ -269,7 +370,8 @@ impl World {
     }
 
     pub fn present(&self) -> usize {
-        self.pilgrims.len()
+        // 香客 + 此刻值守的 NPC（大爷/志愿者）也算寺里的人；幽灵不算
+        self.pilgrims.len() + usize::from(self.npc.as_ref().is_some_and(|n| n.glyph != GHOST))
     }
 
     pub fn is_in(&self, id: Id) -> bool {
@@ -287,14 +389,19 @@ impl World {
             return Action::Idle;
         };
 
-        if me.ringing || me.burning || me.petting || me.talking {
-            // 撞完/上完香/撸完猫/搭完话按任意键起身，继续自由走动
+        if me.ringing || me.burning || me.petting || me.talking || me.reading {
+            // 撞完/上完香/撸完猫/搭完话/读完信按任意键起身，继续自由走动
             if let Some(p) = self.pilgrims.get_mut(&id) {
                 p.ringing = false;
                 p.burning = false;
                 p.petting = false;
                 p.talking = false;
+                p.reading = false;
                 p.blessing = None;
+            }
+            // 读完信起身，这封信就没了（全场同步）
+            if me.reading {
+                self.letter = None;
             }
             return Action::Redraw;
         }
@@ -322,11 +429,11 @@ impl World {
                 }
                 Action::Pet
             }
-            // 站在 NPC 身边按空格：搭话，弹一句对话（不计数）。前面拼「头像：」体现是谁说的
+            // 站在 NPC 身边按空格：搭话，弹一句对话（不计数）。头像后加引号体现是谁说的话
             Key::Space if self.npc_near(me.at).is_some() => {
                 let line = self
                     .npc_near(me.at)
-                    .map(|n| format!("{}：{}", n.glyph, n.line))
+                    .map(|n| format!("{} 「{}」", n.glyph, n.line))
                     .unwrap();
                 if let Some(p) = self.pilgrims.get_mut(&id) {
                     p.talking = true;
@@ -339,6 +446,15 @@ impl World {
                 if let Some(p) = self.pilgrims.get_mut(&id) {
                     p.talking = true;
                     p.blessing = Some(TREE_LINE.to_string());
+                }
+                Action::Talk
+            }
+            // 站在信旁按空格：拆阅，把信的内容显示在下方
+            Key::Space if self.letter_near(me.at) => {
+                let text = self.letter_text.clone().unwrap_or_default();
+                if let Some(p) = self.pilgrims.get_mut(&id) {
+                    p.reading = true;
+                    p.blessing = Some(text);
                 }
                 Action::Talk
             }
@@ -371,7 +487,12 @@ impl World {
             if !(PLAZA_TOP..H).contains(&nr) || nc >= W {
                 continue;
             }
-            if MAP[nr][nc] != '.' || self.occupied((nr, nc)) || self.is_npc((nr, nc)) {
+            // 墙/树挡在 MAP 里，另外别踩到人、NPC、信上
+            if MAP[nr][nc] != '.'
+                || self.occupied((nr, nc))
+                || self.is_npc((nr, nc))
+                || self.is_letter((nr, nc))
+            {
                 continue;
             }
             moves.push((nr, nc));
@@ -416,8 +537,8 @@ impl World {
         if self.occupied(to) {
             return Action::Idle; // 那格有人：撞上，不穿过
         }
-        if to == self.cat_at || self.is_npc(to) {
-            return Action::Idle; // 猫或 NPC 挡在那儿：撞上，不穿过
+        if to == self.cat_at || self.is_npc(to) || self.is_letter(to) {
+            return Action::Idle; // 猫 / NPC / 信挡在那儿：撞上，不穿过
         }
         if let Some(p) = self.pilgrims.get_mut(&id) {
             p.at = to;
@@ -452,6 +573,10 @@ impl World {
                 }
                 if let Some(n) = self.npc.as_ref().filter(|n| n.at == (r, c)) {
                     line.push_str(n.glyph);
+                    continue;
+                }
+                if self.is_letter((r, c)) {
+                    line.push_str(LETTER);
                     continue;
                 }
                 line.push_str(match tile {
@@ -492,6 +617,11 @@ impl World {
         };
 
         let mut out = String::from("\x1b[2J\x1b[H\x1b[?25l\r\n");
+        // 时辰固定钉在视窗正上方，空一行再接画面
+        out.push_str(&format!(
+            "  \x1b[2m{}\x1b[0m\r\n\r\n",
+            sky_mark(self.min_of_day)
+        ));
         for line in &world[top..(top + VIEW_H).min(total)] {
             out.push_str(line);
             out.push_str("\r\n");
@@ -499,7 +629,7 @@ impl World {
 
         out.push_str("\r\n");
         match self.pilgrims.get(&id) {
-            Some(p) if p.ringing || p.burning || p.petting || p.talking => {
+            Some(p) if p.ringing || p.burning || p.petting || p.talking || p.reading => {
                 if let Some(line) = &p.blessing {
                     out.push_str(&format!("  \x1b[33m{line}\x1b[0m\r\n"));
                 }
@@ -516,6 +646,9 @@ impl World {
             Some(p) if can_tree(p.at) => {
                 out.push_str("  \x1b[2m🌳 老樹在側 · 按空格看看\x1b[0m\r\n")
             }
+            Some(p) if self.letter_near(p.at) => {
+                out.push_str("  \x1b[2m📨 有封信 · 按空格拆閱\x1b[0m\r\n")
+            }
             // 站在广场下缘，再往下一步就出寺
             Some(p) if p.at.0 == H - 1 => out.push_str("  \x1b[2m↓ 再往下一步 · 即出寺\x1b[0m\r\n"),
             // 站在广场左/右缘，再往外一步就出寺
@@ -529,6 +662,24 @@ impl World {
         ));
         out
     }
+}
+
+/// 十二时辰名，子時起（子時对应 UTC+8 的 23:00–01:00）
+const SHICHEN: [&str; 12] = [
+    "子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥",
+];
+
+/// 状态栏的天色 + 时辰：白天 ☀️、夜里 🌙，配上当时的十二时辰名（如「☀️  午時」）。
+/// 只出现在状态栏那行（自由文本、不参与地图对齐）。
+fn sky_mark(min_of_day: u32) -> String {
+    let idx = ((min_of_day / 60).div_ceil(2) % 12) as usize;
+    // 卯～酉時（约 05:00–19:00）算白天
+    let icon = if (3..=9).contains(&idx) {
+        "☀️"
+    } else {
+        "🌙"
+    };
+    format!("{}  {}時", icon, SHICHEN[idx])
 }
 
 /// 站在钟的左边、右边或正下方那格，就能敲钟
@@ -970,7 +1121,7 @@ mod tests {
         put(&mut w, 1, (16, 4));
         assert!(w.render(1).contains("按空格搭話"), "挨着 NPC 有提示");
         assert!(matches!(w.handle(1, Key::Space), Action::Talk));
-        assert!(w.render(1).contains("🙋：早"), "对话以头像+冒号开头");
+        assert!(w.render(1).contains("🙋 「早"), "对话头像后带空格和引号");
         assert!(matches!(w.handle(1, Key::Other), Action::Redraw)); // 起身
                                                                     // NPC 挡路：往大爷那格走停住
         assert!(matches!(w.handle(1, Key::Up), Action::Idle));
@@ -983,6 +1134,100 @@ mod tests {
         assert!(matches!(w.handle(1, Key::Other), Action::Redraw)); // 起身
                                                                     // 树也挡路：往树那格走停住
         assert!(matches!(w.handle(1, Key::Down), Action::Idle), "树挡路");
+    }
+
+    #[test]
+    fn npc_counts_as_present() {
+        let mut w = World::default();
+        w.join(1, 0);
+        w.update_npc(12 * 60); // 午休无人
+        assert_eq!(w.present(), 1, "午休只数香客");
+        w.update_npc(8 * 60); // 早上大爷在
+        assert_eq!(w.present(), 2, "大爷也算一个");
+        assert!(w.render(1).contains("寺中此刻 2 人"));
+    }
+
+    #[test]
+    fn ghost_haunts_bell_after_midnight() {
+        // 0–2 点：钟右侧飘着幽灵，能搭话，只吐省略号
+        let n = npc_for(60).expect("凌晨一点该有幽灵");
+        assert_eq!(n.glyph, "👻");
+        assert_eq!(n.at, (0, 5)); // 钟 (0,4) 右邻
+        assert_eq!(n.line, "......");
+        assert!(npc_for(2 * 60).is_none(), "两点后幽灵散去");
+
+        // 站到幽灵下方能搭上话，弹出的正是省略号
+        let mut w = World::default();
+        w.update_npc(60);
+        w.join(1, 0);
+        put(&mut w, 1, (1, 5)); // 幽灵下方相邻一格
+        assert!(matches!(w.handle(1, Key::Space), Action::Talk));
+        assert!(w.render(1).contains("👻 「......」"));
+        assert_eq!(w.present(), 1, "幽灵不算人，只数香客");
+    }
+
+    #[test]
+    fn daily_letter_spawns_in_range() {
+        let mut w = World::default();
+        assert!(!w.tick_letter(6 * 60, 100), "没配内容就不投信");
+        w.set_letter_text("test".into());
+        assert!(!w.tick_letter(5 * 60, 100), "06:00 前不投");
+        assert!(w.tick_letter(6 * 60, 100), "06:00 起投一封");
+        let at = w.letter.as_ref().unwrap().at;
+        assert!(LETTER_ROWS.contains(&at.0), "落在出生点到树之间那几行");
+        assert_eq!(MAP[at.0][at.1], '.', "落在空地");
+        assert!(!w.tick_letter(9 * 60, 100), "当天只投一封");
+        assert!(w.tick_letter(6 * 60, 101), "隔天再投一封");
+    }
+
+    #[test]
+    fn letter_can_be_read_then_vanishes() {
+        let mut w = World::default();
+        w.set_letter_text("香客親啟 · 今日宜撞鐘".into());
+        w.letter = Some(Letter { at: (12, 4) });
+        w.join(1, 0);
+        put(&mut w, 1, (11, 4)); // 信上方相邻一格
+        assert!(w.render(1).contains("按空格拆閱"), "挨着信有提示");
+        // 信挡路：往信那格走停住
+        assert!(matches!(w.handle(1, Key::Down), Action::Idle), "信挡路");
+        assert!(matches!(w.handle(1, Key::Space), Action::Talk));
+        assert!(w.render(1).contains("今日宜撞鐘"), "读到信的内容");
+        assert!(matches!(w.handle(1, Key::Other), Action::Redraw)); // 起身
+        assert!(w.letter.is_none(), "读完起身信就没了");
+        assert!(!w.render(1).contains("按空格拆閱"), "信没了就没提示");
+    }
+
+    #[test]
+    fn cat_never_steps_onto_the_letter() {
+        let mut w = World::default();
+        // 三面用香客堵死
+        w.join(1, 0);
+        put(&mut w, 1, (11, 4));
+        w.join(2, 0);
+        put(&mut w, 2, (10, 3));
+        w.join(3, 0);
+        put(&mut w, 3, (10, 5));
+        w.cat_at = (10, 4);
+        w.letter = Some(Letter { at: (9, 4) }); // 猫正上方是信，第四面
+                                                // 猫会避开信：四面皆堵，原地不动，绝不叠到 📨 上
+        assert!(!w.wander_cat(), "无处可走");
+        assert_eq!(w.cat_at, (10, 4), "猫留在原地");
+    }
+
+    #[test]
+    fn sky_mark_by_time() {
+        let m = |h: u32| h * 60;
+        assert_eq!(sky_mark(m(12)), "☀️  午時"); // 白天
+        assert_eq!(sky_mark(m(5)), "☀️  卯時"); // 卯時算白天
+        assert_eq!(sky_mark(m(23)), "🌙  子時"); // 夜
+        assert_eq!(sky_mark(m(20)), "🌙  戌時"); // 戌時算夜
+                                                 // 时辰钉在视窗上方，人数在底部另起一行
+        let mut w = World::default();
+        w.join(1, 0);
+        w.update_npc(m(12));
+        let screen = w.render(1);
+        assert!(screen.contains("☀️  午時"));
+        assert!(screen.contains("寺中此刻 1 人"));
     }
 
     #[test]

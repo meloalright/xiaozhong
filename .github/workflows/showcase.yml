@@ -59,13 +59,40 @@ jobs:
           Tw='down,down,down,down,left,down,down'        # 同上但不搭话（看空位）
           H='up,left,up,up,up,up,up,space'               # 上到庙堂、大爷旁
           V='left,space'                                 # 广场里志愿者旁
+          G='up,left,up,up,up,up,up,up,up,right,right,space' # 上到庙堂、钟右侧幽灵旁
           seg 480  "① 06:00–10:00 大爺·樹下·早問候"   "$T"  🙋 早啊
           seg 660  "② 10:00–12:00 大爺·樹下·問午飯"   "$T"  🙋 中午
           seg 750  "③ 12:00–14:00 午休·下院沒人"       "$Tw" 🌳
           seg 900  "④ 14:00–16:00 大爺·廟堂·下午忙"   "$H"  🙋 下午
           seg 1020 "⑤ 16:00–18:00 大爺·廟堂·快下班"   "$H"  🙋 下班
-          seg 1140 "⑥ 18:00–21:30 志願者·廣場"         "$V"  👰 志願者
-          seg 1350 "⑦ 21:30–06:00 深夜·沒人"           left  寺中此刻
+          seg 1140 "⑥ 18:00–21:30 志願者·廣場"         "$V"  💇 志願者
+          seg 1350 "⑦ 02:00–06:00 / 21:30 起 深夜·沒人" left  寺中此刻
+          seg 60   "⑧ 00:00–02:00 幽靈·鐘右·只吐省略號" "$G"  👻 ......
+
+      - name: 讀信之後移動（每日一信 · 週三活動日）
+        run: |
+          # 12:30（无 NPC），注入一封信；信落点随机，故蛇形扫遍下院找信、拆閱，
+          # 读完起身继续走，画面里那封 📨 随之消失——演示「读信之后移动」。
+          fuser -k -n tcp 2222 >/dev/null 2>&1 || true; sleep 1
+          rm -rf /tmp/letter
+          ssh-keygen -t ed25519 -N '' -f /tmp/lk -q 2>/dev/null || true
+          XIAOZHONGSI_DATA_DIR=/tmp/letter HTTP_PORT=8080 SSH_PORT=2222 XIAOZHONGSI_FAKE_MIN=750 \
+            XIAOZHONGSI_LETTER='香客親啟：今日週三，聽聞隔壁正是活動日，寺裡清靜，來撞鐘燒香正好。—— 寺祝' \
+            ./target/debug/xiaozhongsi > /tmp/letter.log 2>&1 &
+          pid=$!
+          timeout 20 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.4; done' || true
+          # 每行先贴左墙对齐（吞掉错位），再向右逐格按空格；走到信旁自然拆閱
+          sweep=""
+          for row in 9 10 11 12 13 14; do
+            for _ in $(seq 7); do sweep="$sweep,left"; done
+            for _ in $(seq 7); do sweep="$sweep,space,right"; done
+            sweep="$sweep,down"
+          done
+          sweep="${sweep#,}"
+          python3 ci/drive.py --host 127.0.0.1 --port 2222 --key /tmp/lk --settle 0.2 \
+            --steps "$sweep" --expect 拆閱 --expect 週三 \
+            || echo "（本段未全部命中，看上方畫面即可：讀信後那封 📨 便消失）"
+          kill "$pid" 2>/dev/null || true
 
       - name: 收尾
         if: always()

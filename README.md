@@ -1,27 +1,27 @@
 # 小鐘寺 · a tiny bell temple 🔔🔥
 
 **終端裡的小鐘寺** —— walk into a little bell temple over SSH: strike the bell,
-burn incense in the garden, pet the temple cat, and everyone else inside sees
-you move, live.
+burn incense, pet the temple cat, wander down to the courtyard to see the old
+tree and chat with whoever is on duty, and everyone else inside sees you move,
+live.
 
 ```console
 $ ssh xiaozhongsi.sh
 ```
 
 ```
-        🔔
-++              ++
-++      🧑      ++
-++              ++
 ++++++      ++++++
         🔥
 *,              *,
-*,      🐱👧    *,
+*,      🐱      *,
+*,              *,
+*,      🌳      *,
+*,    🧑🙋      *,
 *,              *,
 *,*,*,      *,*,*,
 
-  🐱 貓在側 · 按空格撸貓
-  寺中此刻 2 人
+  🙋 在此 · 按空格搭話
+  ☀️ 午時 · 寺中此刻 2 人
 ```
 
 Everyone connected at the same time shares one small temple and sees each other
@@ -32,9 +32,22 @@ Stand beside or below the **bell 🔔** and press Space to strike it: everyone
 inside hears it, a `\a` reaching every terminal. Walk out through the doorway
 into the garden and stand below the **censer 🔥** to burn a stick of incense.
 Bell and incense are counted separately, day by day. A **cat 🐱** wanders the
-garden — stand next to it and press Space to give it a pet (just for fun, not
-counted); it holds still while you do. Leave through the garden's flower gate at
-the bottom or the openings on either side.
+grounds — stand next to it and press Space to give it a pet (just for fun, not
+counted); it holds still while you do.
+
+The garden opens into a lower **courtyard** with an old **tree 🌳** (press Space
+next to it for a line). Someone is usually on duty by Shanghai time — a **guard
+🙋** through the day (out by the tree, in the hall in the afternoon), a **night
+volunteer 💇** — stand next to them and press Space to talk; they come and go
+with the hours, and nobody keeps watch at noon or deep in the night. The status
+line marks the hour with the traditional twelve *shichen* (`☀️  午時` /
+`🌙  子時`). Leave through the courtyard's bottom gate or the openings on either
+side.
+
+Each day at 06:00 Shanghai time a **letter 📨** drops on a random patch between
+the spawn point and the tree. It blocks your way; stand next to it and press
+Space to read it — the text is set by the `XIAOZHONGSI_LETTER` environment
+variable. Once whoever opened it rises, the letter is gone until the next day.
 
 The scenery is ASCII two characters wide so it lines up with the two-cell emoji
 standing on it. `curl xiaozhongsi.sh` just points you at SSH.
@@ -48,8 +61,11 @@ standing on it. `curl xiaozhongsi.sh` just points you at SSH.
 | `Space` beside/below the bell 🔔 | strike the bell — heard by all |
 | `Space` below the censer 🔥 | burn a stick of incense |
 | `Space` next to the cat 🐱 | pet it (just for fun) |
+| `Space` next to the tree 🌳 | look at the old tree |
+| `Space` next to whoever's on duty 🙋/💇 | have a word |
+| `Space` next to the daily letter 📨 | read it (then it's gone) |
 | any key | rise again |
-| walk out a garden edge or gate | leave the temple |
+| walk out a courtyard edge or gate | leave the temple |
 | `q` / `Ctrl-C` | leave immediately |
 
 Everything happens inside the temple. A trailing command is ignored — you still
@@ -81,6 +97,8 @@ Configuration is via environment variables:
 | `XIAOZHONGSI_MAX_SESSIONS` | `128` | concurrent SSH sessions before new ones are refused |
 | `XIAOZHONGSI_HOST_KEY` | `host_key` | OpenSSH host key path (generated on first run if absent) |
 | `XIAOZHONGSI_HOST_KEY_PEM` | — | host key as inline PEM; overrides the file, handy for stateless containers |
+| `XIAOZHONGSI_FAKE_MIN` | — | debug: pin the perceived Shanghai minute-of-day (0–1439), e.g. `480` = 08:00, to test the time-based NPCs |
+| `XIAOZHONGSI_LETTER` | — | text of the daily 06:00 letter; unset means no letter |
 
 Rings are counted per public-key fingerprint. Nothing on disk holds the
 fingerprint itself: both the log and the remembered avatars are keyed by

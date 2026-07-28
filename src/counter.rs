@@ -16,6 +16,8 @@ pub struct Stat {
     pub rank: u64,
     /// 这个人今天做了第几次
     pub visits: u64,
+    /// 连着几天做这件事（含今天）；只做了今天算 1，昨天也做过算 2……
+    pub streak: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -96,7 +98,23 @@ impl Book {
         Stat {
             rank: pilgrim.rank,
             visits: pilgrim.visits,
+            streak: self.streak(id),
         }
+    }
+
+    /// 从今天往回逐日数：这个 id 连着几天有记录（含今天）
+    fn streak(&self, id: &str) -> u64 {
+        let mut n = 0;
+        let mut day = today_daynum();
+        while self
+            .days
+            .get(&date_str(day))
+            .is_some_and(|d| d.pilgrims.contains_key(id))
+        {
+            n += 1;
+            day -= 1;
+        }
+        n
     }
 
     /// 只留最近 KEEP_DAYS 天，超了就重写日志
@@ -204,14 +222,23 @@ fn load(path: &Path) -> std::io::Result<(HashMap<String, DayRecord>, usize)> {
     Ok((days, lines))
 }
 
-fn today() -> String {
+/// 东八区「今天」是纪元以来第几天
+fn today_daynum() -> i64 {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
         + TZ_OFFSET_SECS;
-    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    secs.div_euclid(86_400)
+}
+
+fn date_str(z: i64) -> String {
+    let (y, m, d) = civil_from_days(z);
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn today() -> String {
+    date_str(today_daynum())
 }
 
 /// Howard Hinnant 的 civil_from_days，省掉一个 chrono 依赖
@@ -262,6 +289,43 @@ mod tests {
         assert_eq!((a3.rank, a3.visits), (1, 3));
         let d = c.ring("3.3.3.3");
         assert_eq!((d.rank, d.visits), (3, 1));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn streak_counts_consecutive_days() {
+        let dir = std::env::temp_dir().join(format!("xiaozhongsi-streak-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut c = Counter::open(&dir, "salt".into()).unwrap();
+        let id = c.id_of("1.1.1.1");
+
+        // 只做了今天：连击 1
+        assert_eq!(c.ring("1.1.1.1").streak, 1);
+
+        // 手动补上昨天、前天的记录，再撞一次 → 连续三天
+        let td = today_daynum();
+        for back in [1, 2] {
+            c.bell
+                .days
+                .entry(date_str(td - back))
+                .or_default()
+                .pilgrims
+                .insert(id.clone(), Pilgrim { rank: 1, visits: 1 });
+        }
+        assert_eq!(c.ring("1.1.1.1").streak, 3);
+
+        // 把昨天抠掉制造断裂：中间断一天，连击只剩今天
+        c.bell
+            .days
+            .get_mut(&date_str(td - 1))
+            .unwrap()
+            .pilgrims
+            .remove(&id);
+        assert_eq!(c.ring("1.1.1.1").streak, 1);
+
+        // 烧香各算各的：今天头一炷香，连击 1
+        assert_eq!(c.burn("1.1.1.1").streak, 1);
 
         let _ = fs::remove_dir_all(&dir);
     }

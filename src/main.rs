@@ -107,20 +107,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         m0 / 60,
         m0 % 60
     );
-    world
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .update_npc(m0);
+    // 「每日一信」的内容由环境变量注入，空则关闭。
+    // `fly secrets set XIAOZHONGSI_LETTER='...'` 即可改信，不必改代码。
+    let letter = std::env::var("XIAOZHONGSI_LETTER").unwrap_or_default();
+    {
+        let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
+        w.update_npc(m0);
+        w.set_letter_text(letter.clone());
+        w.tick_letter(m0, shanghai_day()); // 若此刻已过 06:00，进程一起就投上今天的信
+    }
+    if letter.trim().is_empty() {
+        println!("[小鐘寺] 每日一信 · 未設 XIAOZHONGSI_LETTER，關閉");
+    } else {
+        println!("[小鐘寺] 每日一信 · 每天 06:00 投一封");
+    }
     {
         let world = Arc::clone(&world);
         let tick = tick.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(NPC_REFRESH).await;
-                let changed = world
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .update_npc(shanghai_min_of_day());
+                let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
+                let min = shanghai_min_of_day();
+                let changed = w.update_npc(min) | w.tick_letter(min, shanghai_day());
+                drop(w);
                 if changed {
                     let _ = tick.send(false);
                 }
@@ -221,6 +231,16 @@ fn shanghai_min_of_day() -> u32 {
         .unwrap_or(0)
         + 8 * 3600;
     ((secs % 86_400) / 60) as u32
+}
+
+/// 上海时间（UTC+8）算「今天」是纪元以来第几天，用来分辨新的一天投新信。
+fn shanghai_day() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+        + 8 * 3600;
+    secs.div_euclid(86_400)
 }
 
 fn env_ports(name: &str, default: &str) -> Vec<u16> {
@@ -685,11 +705,15 @@ impl Temple {
         };
         let mut c = self.counter.lock().unwrap_or_else(|e| e.into_inner());
         let s = c.ring(&fp);
-        if s.visits > 1 {
+        let mut line = if s.visits > 1 {
             format!("你今天第 {} 次撞鐘", s.visits)
         } else {
             format!("你是今天第 {} 位撞鐘", s.rank)
+        };
+        if s.streak >= 2 {
+            line.push_str(&format!(" · 已連續撞鐘 {} 天", s.streak));
         }
+        line
     }
 
     /// 记一次烧香，返回给本人的那句祈愿
@@ -699,11 +723,15 @@ impl Temple {
         };
         let mut c = self.counter.lock().unwrap_or_else(|e| e.into_inner());
         let s = c.burn(&fp);
-        if s.visits > 1 {
+        let mut line = if s.visits > 1 {
             format!("你今天第 {} 炷香", s.visits)
         } else {
             format!("你是今天第 {} 位燒香", s.rank)
+        };
+        if s.streak >= 2 {
+            line.push_str(&format!(" · 已連續燒香 {} 天", s.streak));
         }
+        line
     }
 
     /// 非交互的连接一律谢客：香得自己进廟上，不代拜也不记账
