@@ -10,6 +10,8 @@ $ ssh xiaozhongsi.sh
 ```
 
 ```
+  ☀️  午時   ● 2
+
 ++++++      ++++++
         🔥
 *,              *,
@@ -21,7 +23,6 @@ $ ssh xiaozhongsi.sh
 *,*,*,      *,*,*,
 
   🙋 在此 · 按空格搭話
-  ☀️ 午時 · 寺中此刻 2 人
 ```
 
 Everyone connected at the same time shares one small temple and sees each other
@@ -41,8 +42,9 @@ next to it for a line). Someone is usually on duty by Shanghai time — a **guar
 volunteer 💇** — stand next to them and press Space to talk; they come and go
 with the hours, and nobody keeps watch at noon or deep in the night. The status
 line marks the hour with the traditional twelve *shichen* (the name — 午時,
-子時, … — always shown; the icon before it follows the weather). Leave through
-the courtyard's bottom gate or the openings on either side.
+子時, … — always shown; the icon before it follows the weather), and a green
+`●` with the number of players currently connected. Leave through the
+courtyard's bottom gate or the openings on either side.
 
 The status-line icon follows the **real weather** at the Big Bell Temple
 (大钟寺) in Haidian, Beijing — the real-world namesake of this little temple.

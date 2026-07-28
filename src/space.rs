@@ -393,9 +393,9 @@ impl World {
         self.pilgrims.remove(&id);
     }
 
-    pub fn present(&self) -> usize {
-        // 香客 + 此刻值守的 NPC（大爷/志愿者）也算寺里的人；幽灵不算
-        self.pilgrims.len() + usize::from(self.npc.as_ref().is_some_and(|n| n.glyph != GHOST))
+    /// 在线连接玩家数（只数真正连进来的香客，NPC 和猫都不算）。
+    pub fn online(&self) -> usize {
+        self.pilgrims.len()
     }
 
     pub fn is_in(&self, id: Id) -> bool {
@@ -641,8 +641,12 @@ impl World {
         };
 
         let mut out = String::from("\x1b[2J\x1b[H\x1b[?25l\r\n");
-        // 时辰固定钉在视窗正上方，空一行再接画面（图标随大钟寺天气）
-        out.push_str(&format!("  \x1b[2m{}\x1b[0m\r\n\r\n", self.status_mark()));
+        // 顶行：天气+时辰，后跟绿色 ● + 在线连接玩家数；空一行再接画面
+        out.push_str(&format!(
+            "  \x1b[2m{}\x1b[0m   \x1b[32m● {}\x1b[0m\r\n\r\n",
+            self.status_mark(),
+            self.online()
+        ));
         for line in &world[top..(top + VIEW_H).min(total)] {
             out.push_str(line);
             out.push_str("\r\n");
@@ -677,10 +681,6 @@ impl World {
             Some(p) if p.at.1 == W - 1 => out.push_str("  \x1b[2m→ 再往右一步 · 即出寺\x1b[0m\r\n"),
             _ => out.push_str("  \x1b[2m方向鍵走動\x1b[0m\r\n"),
         }
-        out.push_str(&format!(
-            "  \x1b[2m寺中此刻 {} 人\x1b[0m\r\n",
-            self.present()
-        ));
         out
     }
 }
@@ -1061,7 +1061,7 @@ mod tests {
         let seen = w.render(1);
         assert!(seen.contains(AVATARS[0]), "看得见自己");
         assert!(seen.contains(AVATARS[5]), "看得见别人");
-        assert!(seen.contains("寺中此刻 2 人"));
+        assert!(seen.contains("● 2"), "顶行绿点显示 2 人在线");
 
         w.leave(2);
         assert!(!w.render(1).contains(AVATARS[5]), "走了就看不见了");
@@ -1075,7 +1075,7 @@ mod tests {
         put(&mut w, 1, (9, 4));
         let seen = w.render(1);
         assert!(seen.contains(CAT), "看得见猫");
-        assert!(seen.contains("寺中此刻 1 人"), "猫不算人");
+        assert!(seen.contains("● 1"), "猫不算在线玩家");
     }
 
     #[test]
@@ -1186,14 +1186,16 @@ mod tests {
     }
 
     #[test]
-    fn npc_counts_as_present() {
+    fn online_counts_only_connected_players() {
         let mut w = World::default();
         w.join(1, 0);
-        w.update_npc(12 * 60); // 午休无人
-        assert_eq!(w.present(), 1, "午休只数香客");
         w.update_npc(8 * 60); // 早上大爷在
-        assert_eq!(w.present(), 2, "大爷也算一个");
-        assert!(w.render(1).contains("寺中此刻 2 人"));
+                              // 在线数只算连进来的香客，NPC 不算
+        assert_eq!(w.online(), 1, "大爷不算在线玩家");
+        assert!(w.render(1).contains("● 1"));
+        w.join(2, 3);
+        assert_eq!(w.online(), 2);
+        assert!(w.render(1).contains("● 2"));
     }
 
     #[test]
@@ -1212,7 +1214,7 @@ mod tests {
         put(&mut w, 1, (1, 5)); // 幽灵下方相邻一格
         assert!(matches!(w.handle(1, Key::Space), Action::Talk));
         assert!(w.render(1).contains("👻 「......」"));
-        assert_eq!(w.present(), 1, "幽灵不算人，只数香客");
+        assert_eq!(w.online(), 1, "幽灵不算在线玩家");
     }
 
     #[test]
@@ -1305,13 +1307,13 @@ mod tests {
         assert_eq!(sky_mark(m(5)), "⚡  卯時");
         assert_eq!(sky_mark(m(23)), "⚡  子時");
         assert_eq!(sky_mark(m(20)), "⚡  戌時");
-        // 时辰钉在视窗上方，人数在底部另起一行
+        // 时辰钉在视窗上方，绿点在线数跟在天气+时辰后面
         let mut w = World::default();
         w.join(1, 0);
         w.update_npc(m(12));
         let screen = w.render(1);
         assert!(screen.contains("⚡  午時"), "无天气时兜底 ⚡");
-        assert!(screen.contains("寺中此刻 1 人"));
+        assert!(screen.contains("● 1"), "顶行绿点显示在线数");
     }
 
     #[test]
