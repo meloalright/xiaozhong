@@ -64,10 +64,8 @@ const GHOST: &str = "👻";
 const GHOST_AT: (usize, usize) = (0, 5); // 钟 (0,4) 的右邻
 /// 下院可落东西的行：出生点那排到树那排之间（含两端），购物车落点用
 const COURTYARD_ROWS: std::ops::RangeInclusive<usize> = START_AT.0..=TREE_AT.0; // 9..=14
-/// 每天在出生点到树之间随机出现的购物车。单码位 🛒，有碰撞、能被推着走。
+/// 出生点到树之间随机出现的购物车。单码位 🛒，有碰撞、能被推着走，一直在场。
 const CART: &str = "🛒";
-/// 购物车每天几点出现（和信同一节律）
-const CART_HOUR: u32 = 6;
 /// 空庭：地面留白，只有星光、钟和人
 const FLOOR: &str = "  ";
 /// 窗棂格子墙
@@ -195,10 +193,8 @@ pub struct World {
     letter_text: Option<String>,
     /// 大钟寺此刻的天色图标，由天气任务写入；None 则回落到时辰 ☀️/🌙。
     weather_icon: Option<&'static str>,
-    /// 此刻场上那辆购物车（没有就 None）。
+    /// 此刻场上那辆购物车（没有就 None，会补上）。
     cart: Option<Cart>,
-    /// 已在纪元第几天放过车，保证一天只放一辆。
-    cart_day: Option<i64>,
     /// 调试：把猫钉住不再溜达（给 showcase 演示「推车撞猫」用）。
     cat_pinned: bool,
 }
@@ -213,7 +209,6 @@ impl Default for World {
             letter_text: None,
             weather_icon: None,
             cart: None,
-            cart_day: None,
             cat_pinned: false,
         }
     }
@@ -334,22 +329,22 @@ impl World {
             .is_some_and(|c| at.0.abs_diff(c.at.0) + at.1.abs_diff(c.at.1) == 1)
     }
 
-    /// 每天 06:00 起在出生点到树之间随机放一辆购物车，当天只放一次。放下返回 true。
-    pub fn tick_cart(&mut self, min_of_day: u32, day: i64) -> bool {
-        if min_of_day >= CART_HOUR * 60 && self.cart_day != Some(day) {
-            if let Some(at) = self.random_courtyard_cell() {
-                self.cart = Some(Cart { at });
-                self.cart_day = Some(day);
-                return true;
-            }
+    /// 保证场上有一辆购物车：没有就随机放一辆（不挑时辰、不每天挪位置）。
+    /// 放下了返回 true——进程一起、以及被推出门后补位失败等情况都靠它补上。
+    pub fn ensure_cart(&mut self) -> bool {
+        if self.cart.is_some() {
+            return false;
+        }
+        if let Some(at) = self.random_courtyard_cell() {
+            self.cart = Some(Cart { at });
+            return true;
         }
         false
     }
 
-    /// 调试：把车钉在指定格（当天不再另投）。给 showcase / 测试用。
+    /// 调试：把车钉在指定格。给 showcase / 测试用。
     pub fn place_cart(&mut self, at: (usize, usize)) {
         self.cart = Some(Cart { at });
-        self.cart_day = Some(i64::MAX);
     }
 
     /// 调试：把猫钉在指定格、不再溜达。给 showcase 演示「推车撞猫」用。
@@ -1403,14 +1398,16 @@ mod tests {
     }
 
     #[test]
-    fn daily_cart_appears_in_range() {
+    fn cart_is_always_present() {
         let mut w = World::default();
-        assert!(w.tick_cart(6 * 60, 100), "06:00 起放一辆车");
+        assert!(w.ensure_cart(), "没有车就放一辆");
         let at = w.cart.as_ref().unwrap().at;
         assert!(COURTYARD_ROWS.contains(&at.0), "落在出生点到树之间那几行");
         assert_eq!(MAP[at.0][at.1], '.', "落在空地");
-        assert!(!w.tick_cart(9 * 60, 100), "当天只放一辆");
-        assert!(w.tick_cart(6 * 60, 101), "隔天再放一辆");
+        assert!(!w.ensure_cart(), "已有车就不再放");
+        // 被推没了（模拟补位失败），下一轮会补上
+        w.cart = None;
+        assert!(w.ensure_cart(), "没车了就补一辆");
     }
 
     #[test]

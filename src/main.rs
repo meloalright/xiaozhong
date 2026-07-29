@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         w.update_npc(m0);
         w.set_letter_text(letter.clone());
         if cart_on {
-            w.tick_cart(m0, shanghai_day());
+            w.ensure_cart();
         }
         if let Some(at) = std::env::var("XIAOZHONGSI_FAKE_CART")
             .ok()
@@ -157,9 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 tokio::time::sleep(NPC_REFRESH).await;
                 let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
-                let min = shanghai_min_of_day();
-                let day = shanghai_day();
-                let changed = w.update_npc(min) | (cart_on && w.tick_cart(min, day));
+                let changed = w.update_npc(shanghai_min_of_day()) | (cart_on && w.ensure_cart());
                 drop(w);
                 if changed {
                     let _ = tick.send(false);
@@ -372,16 +370,6 @@ fn json_num(body: &str, key: &str) -> Option<f64> {
         .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
         .unwrap_or(rest.len());
     rest[..end].parse().ok()
-}
-
-/// 上海时间（UTC+8）算「今天」是纪元以来第几天，用来分辨新的一天投新信。
-fn shanghai_day() -> i64 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-        + 8 * 3600;
-    secs.div_euclid(86_400)
 }
 
 fn env_ports(name: &str, default: &str) -> Vec<u16> {
