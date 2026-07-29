@@ -1,0 +1,40 @@
+name: capacity
+
+# 满员场景：占满进寺名额后，新连接应被拒并收到「擁擠 · 稍後再來」提示再断
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  capacity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build
+
+      - name: 满员拒绝 · 提示拥挤稍后再来
+        run: |
+          # 用小上限(3)跑得快又稳；FAKE_MIN 关掉联网天气，结果确定
+          CAP=3
+          mkdir -p /tmp/capd
+          XIAOZHONGSI_DATA_DIR=/tmp/capd HTTP_PORT=8080 SSH_PORT=2222 \
+            XIAOZHONGSI_MAX_SESSIONS=$CAP XIAOZHONGSI_FAKE_MIN=750 \
+            ./target/debug/xiaozhongsi > /tmp/capd.log 2>&1 &
+          echo $! > /tmp/srv.pid
+          echo "等 SSH 端口起来…"
+          timeout 25 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.5; done'
+          grep -a "進寺上限" /tmp/capd.log || true
+          ssh-keygen -t ed25519 -N '' -f /tmp/ck -q
+          # 占满 CAP 个名额后，第 CAP+1 个连接应被拒并收到「擁擠 · 稍後再來」
+          python3 ci/capacity.py --host 127.0.0.1 --port 2222 --key /tmp/ck --cap "$CAP" --expect 擁擠
+          kill "$(cat /tmp/srv.pid)" 2>/dev/null || true
+
+      - name: 收尾
+        if: always()
+        run: fuser -k -n tcp 2222 8080 >/dev/null 2>&1 || true

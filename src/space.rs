@@ -62,13 +62,12 @@ const VOLUNTEER_AT: (usize, usize) = (9, 2); // 夜里的志愿者在广场
 /// 深夜 0–2 点，钟右侧飘着一只幽灵，能搭话但只吐省略号
 const GHOST: &str = "👻";
 const GHOST_AT: (usize, usize) = (0, 5); // 钟 (0,4) 的右邻
-/// 每天 06:00 在出生点到树之间随机落一封信，挡路、可拆阅，读完就没。
-/// 单码位 📨（✉️ 带变体符是 2 码位、会撑歪网格，不能用）。
-const LETTER: &str = "📨";
-/// 信落在哪几排：出生点那排到树那排之间（含两端）
-const LETTER_ROWS: std::ops::RangeInclusive<usize> = START_AT.0..=TREE_AT.0; // 9..=14
-/// 每天几点开始有信
-const LETTER_HOUR: u32 = 6;
+/// 下院可落东西的行：出生点那排到树那排之间（含两端），购物车落点用
+const COURTYARD_ROWS: std::ops::RangeInclusive<usize> = START_AT.0..=TREE_AT.0; // 9..=14
+/// 每天在出生点到树之间随机出现的购物车。单码位 🛒，有碰撞、能被推着走。
+const CART: &str = "🛒";
+/// 购物车每天几点出现（和信同一节律）
+const CART_HOUR: u32 = 6;
 /// 空庭：地面留白，只有星光、钟和人
 const FLOOR: &str = "  ";
 /// 窗棂格子墙
@@ -126,15 +125,17 @@ struct Pilgrim {
     petting: bool,
     /// 正在和 NPC 搭话
     talking: bool,
-    /// 正在拆阅那封信
-    reading: bool,
-    /// 撞钟/烧香/撸猫/搭话/读信后要显示给本人的那句话
+    /// 和工作人员对话的进度：1=刚说完今日之信、还有本来的话要说；否则 0
+    talk_stage: u8,
+    /// 是否挪过步——刚进寺没动过时给一次走动提示，动过就不再提示
+    moved: bool,
+    /// 撞钟/烧香/撸猫/搭话后要显示给本人的那句话
     blessing: Option<String>,
 }
 
-/// 每天 06:00 冒出来的一封信。落在随机空地，挡路；有人读完起身就消失。
+/// 每天出现的购物车。落在随机空地，有碰撞，能被人推着走。
 #[derive(Clone, PartialEq, Debug)]
-struct Letter {
+struct Cart {
     at: (usize, usize),
 }
 
@@ -171,10 +172,10 @@ fn npc_for(min_of_day: u32) -> Option<Npc> {
             line: "......",
         }),
         6..=9 => guard(GUARD_TREE, "早啊，這麼早就來啦？"),
-        10..=11 => guard(GUARD_TREE, "快晌午了，中午吃點啥好？"),
+        10..=11 => guard(GUARD_TREE, "快到中午了哦。"),
         // 12–13：午休，无人
-        14..=15 => guard(GUARD_HALL, "趁人少，我巡一圈，你自便。"),
-        16..=17 => guard(GUARD_HALL, "再撐會兒就下班嘍。"),
+        14..=15 => guard(GUARD_HALL, "下午好，寺裡隨便轉轉，別客氣。"),
+        16..=17 => guard(GUARD_HALL, "等下就快下班了。"),
         18..=20 => volunteer(),
         21 if min_of_day < 21 * 60 + 30 => volunteer(),
         _ => None,
@@ -190,14 +191,16 @@ pub struct World {
     npc: Option<Npc>,
     /// 上海时间「当天第几分钟」，用来在状态栏报时辰。随 update_npc 刷新。
     min_of_day: u32,
-    /// 此刻场上那封信（没有就 None）。
-    letter: Option<Letter>,
-    /// 信的内容，由环境变量注入；空则整个功能关闭。
+    /// 今日的信内容，由环境变量注入。工作人员对话时会先带一句。
     letter_text: Option<String>,
-    /// 已在纪元第几天投过信，保证一天只投一封（读完当天也不再冒）。
-    letter_day: Option<i64>,
     /// 大钟寺此刻的天色图标，由天气任务写入；None 则回落到时辰 ☀️/🌙。
     weather_icon: Option<&'static str>,
+    /// 此刻场上那辆购物车（没有就 None）。
+    cart: Option<Cart>,
+    /// 已在纪元第几天放过车，保证一天只放一辆。
+    cart_day: Option<i64>,
+    /// 调试：把猫钉住不再溜达（给 showcase 演示「推车撞猫」用）。
+    cat_pinned: bool,
 }
 
 impl Default for World {
@@ -207,10 +210,11 @@ impl Default for World {
             cat_at: CAT_START,
             npc: None,
             min_of_day: 0,
-            letter: None,
             letter_text: None,
-            letter_day: None,
             weather_icon: None,
+            cart: None,
+            cart_day: None,
+            cat_pinned: false,
         }
     }
 }
@@ -242,7 +246,8 @@ impl World {
                 burning: false,
                 petting: false,
                 talking: false,
-                reading: false,
+                talk_stage: 0,
+                moved: false,
                 blessing: None,
             },
         );
@@ -258,18 +263,15 @@ impl World {
         }
     }
 
-    /// 状态栏那行：图标用天气（有就用），名字始终是时辰。
+    /// 状态栏那行：天气图标（有就用，没有兜底 ⚡）+ 真实上海时间 HH:MM。
     fn status_mark(&self) -> String {
         match self.weather_icon {
-            Some(icon) => {
-                let idx = shichen_idx(self.min_of_day);
-                format!("{}  {}時", icon, SHICHEN[idx])
-            }
+            Some(icon) => format!("{}  {}", icon, hhmm(self.min_of_day)),
             None => sky_mark(self.min_of_day),
         }
     }
 
-    /// 注入信的内容（来自环境变量）。空字符串则关闭「每日一信」。
+    /// 注入信的内容（来自环境变量）。空字符串则没有信。
     pub fn set_letter_text(&mut self, text: String) {
         self.letter_text = if text.trim().is_empty() {
             None
@@ -278,33 +280,38 @@ impl World {
         };
     }
 
-    /// 每天 06:00 起投一封信，当天只投一次。投下了返回 true（好广播重画）。
-    /// 位置从出生点到树之间的空地里随机挑一格。day 是纪元第几天，用来分辨新的一天。
-    pub fn tick_letter(&mut self, min_of_day: u32, day: i64) -> bool {
-        // 没配内容就没有信
-        if self.letter_text.as_deref().unwrap_or("").is_empty() {
-            return false;
-        }
-        if min_of_day >= LETTER_HOUR * 60 && self.letter_day != Some(day) {
-            if let Some(at) = self.random_letter_cell() {
-                self.letter = Some(Letter { at });
-                self.letter_day = Some(day);
-                return true;
-            }
-        }
-        false
+    /// 今日的信内容（非空才有）。工作人员对话时会先带一句。
+    pub fn letter_text(&self) -> Option<&str> {
+        self.letter_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 
-    /// 出生点到树之间的空地里随机挑一格放信（避开人、猫、NPC、挡路块）。
-    fn random_letter_cell(&self) -> Option<(usize, usize)> {
+    /// 这格能不能站人／放东西：地图上是空地 '.'，且没有人、猫、NPC、车。
+    fn cell_free(&self, at: (usize, usize)) -> bool {
+        MAP[at.0][at.1] == '.'
+            && !self.occupied(at)
+            && at != self.cat_at
+            && !self.is_npc(at)
+            && !self.is_cart(at)
+    }
+
+    /// 有符号坐标落回网格；越界返回 None（相当于撞上地图边界这堵墙）。
+    fn on_grid(&self, (r, c): (isize, isize)) -> Option<(usize, usize)> {
+        if r >= 0 && (r as usize) < H && c >= 0 && (c as usize) < W {
+            Some((r as usize, c as usize))
+        } else {
+            None
+        }
+    }
+
+    /// 出生点到树之间的空地里随机挑一格（购物车落点用；和猫人 NPC 都不叠）。
+    fn random_courtyard_cell(&self) -> Option<(usize, usize)> {
         let mut cells: Vec<(usize, usize)> = Vec::new();
-        for r in LETTER_ROWS {
-            for (c, &tile) in MAP[r].iter().enumerate() {
-                if tile == '.'
-                    && !self.occupied((r, c))
-                    && (r, c) != self.cat_at
-                    && !self.is_npc((r, c))
-                {
+        for r in COURTYARD_ROWS {
+            for c in 0..W {
+                if self.cell_free((r, c)) {
                     cells.push((r, c));
                 }
             }
@@ -316,15 +323,106 @@ impl World {
         }
     }
 
-    fn is_letter(&self, at: (usize, usize)) -> bool {
-        self.letter.as_ref().is_some_and(|l| l.at == at)
+    fn is_cart(&self, at: (usize, usize)) -> bool {
+        self.cart.as_ref().is_some_and(|c| c.at == at)
     }
 
-    /// 站在信的上下左右相邻一格，就能拆阅
-    fn letter_near(&self, at: (usize, usize)) -> bool {
-        self.letter
+    /// 站在车的上下左右相邻一格，就够得着推
+    fn cart_near(&self, at: (usize, usize)) -> bool {
+        self.cart
             .as_ref()
-            .is_some_and(|l| at.0.abs_diff(l.at.0) + at.1.abs_diff(l.at.1) == 1)
+            .is_some_and(|c| at.0.abs_diff(c.at.0) + at.1.abs_diff(c.at.1) == 1)
+    }
+
+    /// 每天 06:00 起在出生点到树之间随机放一辆购物车，当天只放一次。放下返回 true。
+    pub fn tick_cart(&mut self, min_of_day: u32, day: i64) -> bool {
+        if min_of_day >= CART_HOUR * 60 && self.cart_day != Some(day) {
+            if let Some(at) = self.random_courtyard_cell() {
+                self.cart = Some(Cart { at });
+                self.cart_day = Some(day);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 调试：把车钉在指定格（当天不再另投）。给 showcase / 测试用。
+    pub fn place_cart(&mut self, at: (usize, usize)) {
+        self.cart = Some(Cart { at });
+        self.cart_day = Some(i64::MAX);
+    }
+
+    /// 调试：把猫钉在指定格、不再溜达。给 showcase 演示「推车撞猫」用。
+    pub fn pin_cat(&mut self, at: (usize, usize)) {
+        self.cat_at = at;
+        self.cat_pinned = true;
+    }
+
+    /// 朝车按方向键：把车往同方向推一格，人跟进车原来那格。
+    /// 车前方是墙（含地图边界/树）就随机往垂直方向弹开；两侧都堵就推不动。
+    fn push_cart(&mut self, id: Id, cart_at: (usize, usize), key: Key) -> Action {
+        let (dr, dc): (isize, isize) = match key {
+            Key::Up => (-1, 0),
+            Key::Down => (1, 0),
+            Key::Left => (0, -1),
+            Key::Right => (0, 1),
+            _ => return Action::Idle,
+        };
+        let (cr, cc) = (cart_at.0 as isize, cart_at.1 as isize);
+        match self.on_grid((cr + dr, cc + dc)) {
+            // 前方是车能占的空地：正常推，车往前、人进到车原来那格
+            Some(cell) if self.cart_free(cell) => {
+                self.cart = Some(Cart { at: cell });
+                self.move_into(id, cart_at);
+                Action::Redraw
+            }
+            // 前方有任何碰撞体（人/猫/火/墙/树/信/大殿行政墙）：沿碰撞法线的垂直方向弹开
+            Some(_) => self.bounce_cart(id, cart_at, dr, dc),
+            // 推出了地图边界＝出寺：车回到出生那几行随机位置，人进到车原来那格
+            None => {
+                self.cart = self.random_courtyard_cell().map(|at| Cart { at });
+                self.move_into(id, cart_at);
+                Action::Redraw
+            }
+        }
+    }
+
+    /// 车能占的格：不进大殿(row<PLAZA_TOP)，且是空地、没别的东西。
+    fn cart_free(&self, at: (usize, usize)) -> bool {
+        at.0 >= PLAZA_TOP && self.cell_free(at)
+    }
+
+    /// 车撞上碰撞体（墙/树/火/人/猫/信/大殿）：沿碰撞法线的垂直方向随机弹一格；
+    /// 两侧都堵着就纹丝不动。
+    fn bounce_cart(&mut self, id: Id, cart_at: (usize, usize), dr: isize, _dc: isize) -> Action {
+        // 推的是竖向(dr!=0)就往左右弹，推的是横向就往上下弹
+        let perp: [(isize, isize); 2] = if dr != 0 {
+            [(0, -1), (0, 1)]
+        } else {
+            [(-1, 0), (1, 0)]
+        };
+        let (cr, cc) = (cart_at.0 as isize, cart_at.1 as isize);
+        let opts: Vec<(usize, usize)> = perp
+            .iter()
+            .filter_map(|(pr, pc)| self.on_grid((cr + pr, cc + pc)))
+            .filter(|&cell| self.cart_free(cell))
+            .collect();
+        if opts.is_empty() {
+            return Action::Idle;
+        }
+        self.cart = Some(Cart {
+            at: opts[rand::random_range(0..opts.len())],
+        });
+        self.move_into(id, cart_at); // 人进到车原来那格
+        Action::Redraw
+    }
+
+    /// 把某人挪到 at，并记下他动过（不再显示走动提示）
+    fn move_into(&mut self, id: Id, at: (usize, usize)) {
+        if let Some(p) = self.pilgrims.get_mut(&id) {
+            p.at = at;
+            p.moved = true;
+        }
     }
 
     /// 按上海时间刷新值守 NPC 与时辰；NPC 变了返回 true（好决定要不要广播重画）。
@@ -346,22 +444,13 @@ impl World {
     /// 落脚点：优先 START_AT，被占了就找离它最近的空地。
     /// 全都占满（几乎不会）才退回 START_AT 叠一格。
     fn spawn_cell(&self) -> (usize, usize) {
-        if !self.occupied(START_AT)
-            && START_AT != self.cat_at
-            && !self.is_npc(START_AT)
-            && !self.is_letter(START_AT)
-        {
+        if self.cell_free(START_AT) {
             return START_AT;
         }
         let mut best: Option<((usize, usize), usize)> = None;
         for (r, row) in MAP.iter().enumerate() {
-            for (c, &tile) in row.iter().enumerate() {
-                if tile != '.'
-                    || self.occupied((r, c))
-                    || (r, c) == self.cat_at
-                    || self.is_npc((r, c))
-                    || self.is_letter((r, c))
-                {
+            for (c, _tile) in row.iter().enumerate() {
+                if !self.cell_free((r, c)) {
                     continue;
                 }
                 let d = r.abs_diff(START_AT.0) + c.abs_diff(START_AT.1);
@@ -413,19 +502,34 @@ impl World {
             return Action::Idle;
         };
 
-        if me.ringing || me.burning || me.petting || me.talking || me.reading {
-            // 撞完/上完香/撸完猫/搭完话/读完信按任意键起身，继续自由走动
+        if me.ringing || me.burning || me.petting {
+            // 撞完/上完香/撸完猫按任意键起身，继续自由走动
             if let Some(p) = self.pilgrims.get_mut(&id) {
                 p.ringing = false;
                 p.burning = false;
                 p.petting = false;
-                p.talking = false;
-                p.reading = false;
                 p.blessing = None;
             }
-            // 读完信起身，这封信就没了（全场同步）
-            if me.reading {
-                self.letter = None;
+            return Action::Redraw;
+        }
+        if me.talking {
+            // 和工作人员对话：说完信(stage 1)后按空格接着说本来的话；其它键（或已说完）起身
+            if key == Key::Space && me.talk_stage == 1 {
+                if let Some(line) = self
+                    .npc_near(me.at)
+                    .map(|n| format!("{} 「{}」", n.glyph, n.line))
+                {
+                    if let Some(p) = self.pilgrims.get_mut(&id) {
+                        p.talk_stage = 2;
+                        p.blessing = Some(line);
+                    }
+                    return Action::Talk;
+                }
+            }
+            if let Some(p) = self.pilgrims.get_mut(&id) {
+                p.talking = false;
+                p.talk_stage = 0;
+                p.blessing = None;
             }
             return Action::Redraw;
         }
@@ -453,15 +557,21 @@ impl World {
                 }
                 Action::Pet
             }
-            // 站在 NPC 身边按空格：搭话，弹一句对话（不计数）。头像后加引号体现是谁说的话
+            // 站在 NPC 身边按空格：搭话。工作人员（大爷/志愿者）每次先带一句今日之信，
+            // 再按一下才说本来的话（按两下）；幽灵、没配信时就单句。
             Key::Space if self.npc_near(me.at).is_some() => {
-                let line = self
-                    .npc_near(me.at)
-                    .map(|n| format!("{} 「{}」", n.glyph, n.line))
-                    .unwrap();
+                let n = self.npc_near(me.at).unwrap();
+                let glyph = n.glyph;
+                let npc_line = n.line;
+                let is_staff = glyph != GHOST;
+                let (blessing, stage) = match self.letter_text() {
+                    Some(letter) if is_staff => (format!("{glyph} 「{letter}」"), 1u8),
+                    _ => (format!("{glyph} 「{npc_line}」"), 0u8),
+                };
                 if let Some(p) = self.pilgrims.get_mut(&id) {
                     p.talking = true;
-                    p.blessing = Some(line);
+                    p.talk_stage = stage;
+                    p.blessing = Some(blessing);
                 }
                 Action::Talk
             }
@@ -473,12 +583,11 @@ impl World {
                 }
                 Action::Talk
             }
-            // 站在信旁按空格：拆阅，把信的内容显示在下方
-            Key::Space if self.letter_near(me.at) => {
-                let text = self.letter_text.clone().unwrap_or_default();
+            // 站在车旁按空格：告知能推
+            Key::Space if self.cart_near(me.at) => {
                 if let Some(p) = self.pilgrims.get_mut(&id) {
-                    p.reading = true;
-                    p.blessing = Some(text);
+                    p.talking = true;
+                    p.blessing = Some("這車推得動".to_string());
                 }
                 Action::Talk
             }
@@ -495,8 +604,8 @@ impl World {
 
     /// 猫随机挪一格：只在广场、只走空地、不踩人。挪动了返回 true。
     pub fn wander_cat(&mut self) -> bool {
-        // 正被撸时定住不走，免得人在原地撸、猫却溜了
-        if self.anyone_petting() {
+        // 调试钉住、或正被撸时都定住不走
+        if self.cat_pinned || self.anyone_petting() {
             return false;
         }
         let (r, c) = self.cat_at;
@@ -511,12 +620,8 @@ impl World {
             if !(PLAZA_TOP..H).contains(&nr) || nc >= W {
                 continue;
             }
-            // 墙/树挡在 MAP 里，另外别踩到人、NPC、信上
-            if MAP[nr][nc] != '.'
-                || self.occupied((nr, nc))
-                || self.is_npc((nr, nc))
-                || self.is_letter((nr, nc))
-            {
+            // 墙/树挡在 MAP 里，另外别踩到人、NPC、信、车上
+            if !self.cell_free((nr, nc)) {
                 continue;
             }
             moves.push((nr, nc));
@@ -555,18 +660,20 @@ impl World {
             }
             _ => return Action::Idle,
         };
+        // 目标格正好是购物车：不是撞停，而是朝同方向推它
+        if self.is_cart(to) {
+            return self.push_cart(id, to, key);
+        }
         if MAP[to.0][to.1] != '.' {
             return Action::Idle; // 钟和窗棂挡路
         }
         if self.occupied(to) {
             return Action::Idle; // 那格有人：撞上，不穿过
         }
-        if to == self.cat_at || self.is_npc(to) || self.is_letter(to) {
-            return Action::Idle; // 猫 / NPC / 信挡在那儿：撞上，不穿过
+        if to == self.cat_at || self.is_npc(to) {
+            return Action::Idle; // 猫 / NPC 挡在那儿：撞上，不穿过
         }
-        if let Some(p) = self.pilgrims.get_mut(&id) {
-            p.at = to;
-        }
+        self.move_into(id, to);
         Action::Redraw
     }
 
@@ -599,8 +706,8 @@ impl World {
                     line.push_str(n.glyph);
                     continue;
                 }
-                if self.is_letter((r, c)) {
-                    line.push_str(LETTER);
+                if self.is_cart((r, c)) {
+                    line.push_str(CART);
                     continue;
                 }
                 line.push_str(match tile {
@@ -654,54 +761,49 @@ impl World {
 
         out.push_str("\r\n");
         match self.pilgrims.get(&id) {
-            Some(p) if p.ringing || p.burning || p.petting || p.talking || p.reading => {
+            Some(p) if p.ringing || p.burning || p.petting || p.talking => {
                 if let Some(line) = &p.blessing {
                     out.push_str(&format!("  \x1b[33m{line}\x1b[0m\r\n"));
                 }
             }
-            Some(p) if can_ring(p.at) => out.push_str("  \x1b[2m鐘在側 · 按空格撞鐘\x1b[0m\r\n"),
-            Some(p) if can_burn(p.at) => out.push_str("  \x1b[2m香爐在前 · 按空格燒香\x1b[0m\r\n"),
+            Some(p) if can_ring(p.at) => out.push_str("  \x1b[2m鐘 · 按空格撞鐘\x1b[0m\r\n"),
+            Some(p) if can_burn(p.at) => out.push_str("  \x1b[2m香爐 · 按空格燒香\x1b[0m\r\n"),
             Some(p) if can_pet(p.at, self.cat_at) => {
-                out.push_str("  \x1b[2m🐱 貓在側 · 按空格撸貓\x1b[0m\r\n")
+                out.push_str("  \x1b[2m🐱 貓 · 按空格撸貓\x1b[0m\r\n")
             }
             Some(p) if self.npc_near(p.at).is_some() => {
                 let g = self.npc.as_ref().map_or("", |n| n.glyph);
-                out.push_str(&format!("  \x1b[2m{g} 在此 · 按空格搭話\x1b[0m\r\n"));
+                out.push_str(&format!("  \x1b[2m{g} · 按空格搭話\x1b[0m\r\n"));
             }
-            Some(p) if can_tree(p.at) => {
-                out.push_str("  \x1b[2m🌳 老樹在側 · 按空格看看\x1b[0m\r\n")
-            }
-            Some(p) if self.letter_near(p.at) => {
-                out.push_str("  \x1b[2m📨 有封信 · 按空格拆閱\x1b[0m\r\n")
+            Some(p) if can_tree(p.at) => out.push_str("  \x1b[2m🌳 老樹 · 按空格看看\x1b[0m\r\n"),
+            Some(p) if self.cart_near(p.at) => {
+                out.push_str("  \x1b[2m🛒 購物車 · 按空格看看\x1b[0m\r\n")
             }
             // 站在广场下缘，再往下一步就出寺
             Some(p) if p.at.0 == H - 1 => out.push_str("  \x1b[2m↓ 再往下一步 · 即出寺\x1b[0m\r\n"),
             // 站在广场左/右缘，再往外一步就出寺
             Some(p) if p.at.1 == 0 => out.push_str("  \x1b[2m← 再往左一步 · 即出寺\x1b[0m\r\n"),
             Some(p) if p.at.1 == W - 1 => out.push_str("  \x1b[2m→ 再往右一步 · 即出寺\x1b[0m\r\n"),
-            _ => out.push_str("  \x1b[2m方向鍵走動\x1b[0m\r\n"),
+            // 走动提示只在刚进寺、还没挪过步时给一次；动过之后就留空行，不再唠叨
+            Some(p) if !p.moved => out.push_str("  \x1b[2m← ↑ → 方向鍵走動\x1b[0m\r\n"),
+            _ => out.push_str("\r\n"),
         }
         out
     }
 }
 
-/// 十二时辰名，子時起（子時对应 UTC+8 的 23:00–01:00）
-const SHICHEN: [&str; 12] = [
-    "子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥",
-];
-
-/// 当前是第几个时辰（0=子…），供状态栏取时辰名用。
-fn shichen_idx(min_of_day: u32) -> usize {
-    ((min_of_day / 60).div_ceil(2) % 12) as usize
+/// 上海时间「当天第几分钟」格式化成 HH:MM
+fn hhmm(min_of_day: u32) -> String {
+    format!("{:02}:{:02}", min_of_day / 60, min_of_day % 60)
 }
 
 /// 拿不到天气时的兜底图标：⚡ —— 大概整个地球都被雷劈了，所以查询失败。
 /// 单码位、默认彩色，且状态栏是自由文本行，怎么放都安全。
 const FALLBACK_ICON: &str = "⚡";
 
-/// 没有天气数据时的状态栏：图标一律 ⚡，名字仍是当时的时辰。
+/// 没有天气数据时的状态栏：图标一律 ⚡，时间照旧 HH:MM。
 fn sky_mark(min_of_day: u32) -> String {
-    format!("{}  {}時", FALLBACK_ICON, SHICHEN[shichen_idx(min_of_day)])
+    format!("{}  {}", FALLBACK_ICON, hhmm(min_of_day))
 }
 
 /// 把 Open-Meteo 的原始字段映射成状态栏那行的天色图标。
@@ -879,19 +981,19 @@ impl KeyParser {
                     keys.push(Key::Quit);
                     i += 1;
                 }
-                b'w' | b'k' => {
+                b'w' => {
                     keys.push(Key::Up);
                     i += 1;
                 }
-                b's' | b'j' => {
+                b's' => {
                     keys.push(Key::Down);
                     i += 1;
                 }
-                b'a' | b'h' => {
+                b'a' => {
                     keys.push(Key::Left);
                     i += 1;
                 }
-                b'd' | b'l' => {
+                b'd' => {
                     keys.push(Key::Right);
                     i += 1;
                 }
@@ -1218,51 +1320,52 @@ mod tests {
     }
 
     #[test]
-    fn daily_letter_spawns_in_range() {
+    fn staff_talk_says_letter_first_then_line() {
         let mut w = World::default();
-        assert!(!w.tick_letter(6 * 60, 100), "没配内容就不投信");
-        w.set_letter_text("test".into());
-        assert!(!w.tick_letter(5 * 60, 100), "06:00 前不投");
-        assert!(w.tick_letter(6 * 60, 100), "06:00 起投一封");
-        let at = w.letter.as_ref().unwrap().at;
-        assert!(LETTER_ROWS.contains(&at.0), "落在出生点到树之间那几行");
-        assert_eq!(MAP[at.0][at.1], '.', "落在空地");
-        assert!(!w.tick_letter(9 * 60, 100), "当天只投一封");
-        assert!(w.tick_letter(6 * 60, 101), "隔天再投一封");
-    }
-
-    #[test]
-    fn letter_can_be_read_then_vanishes() {
-        let mut w = World::default();
-        w.set_letter_text("香客親啟 · 今日宜撞鐘".into());
-        w.letter = Some(Letter { at: (12, 4) });
+        w.set_letter_text("今天是隔壁活動日".into());
+        w.update_npc(6 * 60); // 早上：大爷在树下 (15,4)
         w.join(1, 0);
-        put(&mut w, 1, (11, 4)); // 信上方相邻一格
-        assert!(w.render(1).contains("按空格拆閱"), "挨着信有提示");
-        // 信挡路：往信那格走停住
-        assert!(matches!(w.handle(1, Key::Down), Action::Idle), "信挡路");
+        put(&mut w, 1, (16, 4)); // 大爷相邻
+                                 // 第一下：先说今日之信
         assert!(matches!(w.handle(1, Key::Space), Action::Talk));
-        assert!(w.render(1).contains("今日宜撞鐘"), "读到信的内容");
-        assert!(matches!(w.handle(1, Key::Other), Action::Redraw)); // 起身
-        assert!(w.letter.is_none(), "读完起身信就没了");
-        assert!(!w.render(1).contains("按空格拆閱"), "信没了就没提示");
+        assert!(
+            w.render(1).contains("🙋 「今天是隔壁活動日」"),
+            "先带一句信"
+        );
+        // 第二下（空格）：再说本来的话
+        assert!(matches!(w.handle(1, Key::Space), Action::Talk));
+        assert!(w.render(1).contains("🙋 「早"), "接着说本来的话");
+        // 之后任意键起身
+        assert!(matches!(w.handle(1, Key::Other), Action::Redraw));
+        assert!(!w.render(1).contains("「今天是隔壁活動日」"));
     }
 
     #[test]
-    fn cat_never_steps_onto_the_letter() {
+    fn no_letter_or_ghost_talk_is_single_line() {
+        // 没配信：大爷直接说本来的话，一下就完
         let mut w = World::default();
-        // 三面用香客堵死
+        w.update_npc(6 * 60);
         w.join(1, 0);
-        put(&mut w, 1, (11, 4));
+        put(&mut w, 1, (16, 4));
+        assert!(matches!(w.handle(1, Key::Space), Action::Talk));
+        assert!(w.render(1).contains("🙋 「早"));
+        assert!(
+            matches!(w.handle(1, Key::Space), Action::Redraw),
+            "单句，空格即起身"
+        );
+
+        // 幽灵：即使配了信也只吐省略号
+        let mut w = World::default();
+        w.set_letter_text("今天是隔壁活動日".into());
+        w.update_npc(60); // 凌晨幽灵在钟右 (0,5)
         w.join(2, 0);
-        put(&mut w, 2, (10, 3));
-        w.join(3, 0);
-        put(&mut w, 3, (10, 5));
-        w.cat_at = (10, 4);
-        w.letter = Some(Letter { at: (9, 4) }); // 猫正上方是信，第四面
-                                                // 猫会避开信：四面皆堵，原地不动，绝不叠到 📨 上
-        assert!(!w.wander_cat(), "无处可走");
-        assert_eq!(w.cat_at, (10, 4), "猫留在原地");
+        put(&mut w, 2, (1, 5));
+        assert!(matches!(w.handle(2, Key::Space), Action::Talk));
+        let s = w.render(2);
+        assert!(
+            s.contains("👻 「......」") && !s.contains("活動日"),
+            "幽灵单句"
+        );
     }
 
     #[test]
@@ -1283,36 +1386,130 @@ mod tests {
     }
 
     #[test]
-    fn weather_overrides_fallback_icon_but_keeps_name() {
+    fn weather_overrides_fallback_icon_but_keeps_time() {
         let mut w = World::default();
         w.join(1, 0);
-        w.update_npc(12 * 60); // 午時
-                               // 无天气：兜底 ⚡
-        assert!(w.render(1).contains("⚡  午時"));
-        // 天气任务写入雨：图标变 🌧️，时辰名保留
+        w.update_npc(12 * 60 + 30); // 12:30
+                                    // 无天气：兜底 ⚡ + 时间
+        assert!(w.render(1).contains("⚡  12:30"));
+        // 天气任务写入雨：图标变 🌧️，时间保留
         assert!(w.set_weather(Some("🌧️")));
         let s = w.render(1);
-        assert!(s.contains("🌧️  午時"), "图标随天气、名字仍是时辰");
-        assert!(!s.contains("⚡  午時"));
+        assert!(s.contains("🌧️  12:30"), "图标随天气、时间照旧");
+        assert!(!s.contains("⚡  12:30"));
         // 天气丢失回落：又变回 ⚡
         assert!(w.set_weather(None));
-        assert!(w.render(1).contains("⚡  午時"));
+        assert!(w.render(1).contains("⚡  12:30"));
     }
 
     #[test]
-    fn sky_mark_by_time() {
-        let m = |h: u32| h * 60;
-        // 没有天气数据时兜底成 ⚡，名字仍是各自时辰
-        assert_eq!(sky_mark(m(12)), "⚡  午時");
-        assert_eq!(sky_mark(m(5)), "⚡  卯時");
-        assert_eq!(sky_mark(m(23)), "⚡  子時");
-        assert_eq!(sky_mark(m(20)), "⚡  戌時");
-        // 时辰钉在视窗上方，绿点在线数跟在天气+时辰后面
+    fn daily_cart_appears_in_range() {
+        let mut w = World::default();
+        assert!(w.tick_cart(6 * 60, 100), "06:00 起放一辆车");
+        let at = w.cart.as_ref().unwrap().at;
+        assert!(COURTYARD_ROWS.contains(&at.0), "落在出生点到树之间那几行");
+        assert_eq!(MAP[at.0][at.1], '.', "落在空地");
+        assert!(!w.tick_cart(9 * 60, 100), "当天只放一辆");
+        assert!(w.tick_cart(6 * 60, 101), "隔天再放一辆");
+    }
+
+    #[test]
+    fn pushing_cart_moves_both() {
         let mut w = World::default();
         w.join(1, 0);
-        w.update_npc(m(12));
+        w.place_cart((12, 4));
+        put(&mut w, 1, (12, 3)); // 车左侧
+        assert!(w.render(1).contains("🛒 購物車"), "挨着车有提示");
+        assert!(matches!(w.handle(1, Key::Space), Action::Talk));
+        assert!(w.render(1).contains("推得動"), "按空格告知能推");
+        assert!(matches!(w.handle(1, Key::Other), Action::Redraw)); // 起身
+                                                                    // 朝右推：车和人都往右一格
+        assert!(matches!(w.handle(1, Key::Right), Action::Redraw));
+        assert_eq!(w.cart.as_ref().unwrap().at, (12, 5), "车往右一格");
+        assert_eq!(w.pilgrims[&1].at, (12, 4), "人跟进车原来那格");
+    }
+
+    #[test]
+    fn cart_bounces_off_wall() {
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((12, 1)); // 紧挨左墙（col0 是花篱）
+        put(&mut w, 1, (12, 2)); // 车右侧
+                                 // 朝左推 → 车前方是墙 → 垂直弹到上或下
+        assert!(matches!(w.handle(1, Key::Left), Action::Redraw));
+        let c = w.cart.as_ref().unwrap().at;
+        assert!(c == (11, 1) || c == (13, 1), "撞墙往垂直弹开，实际 {c:?}");
+        assert_ne!(c, (12, 0), "没被推进墙里");
+        assert_eq!(w.pilgrims[&1].at, (12, 1), "人进到车原来那格");
+    }
+
+    #[test]
+    fn cart_bounces_off_a_person_too() {
+        let mut w = World::default();
+        w.join(1, 0);
+        w.join(2, 3);
+        w.place_cart((12, 4));
+        put(&mut w, 1, (12, 3)); // 推的人在车左侧
+        put(&mut w, 2, (12, 5)); // 另一个人堵在车右侧
+                                 // 朝右推 → 车前方是人（碰撞体）→ 垂直弹开，不是撞停
+        assert!(matches!(w.handle(1, Key::Right), Action::Redraw));
+        let c = w.cart.as_ref().unwrap().at;
+        assert!(c == (11, 4) || c == (13, 4), "撞人往垂直弹开，实际 {c:?}");
+        assert_ne!(c, (12, 5), "没叠到人身上");
+        assert_eq!(w.pilgrims[&1].at, (12, 4), "人进到车原来那格");
+    }
+
+    #[test]
+    fn cart_cannot_enter_the_hall() {
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((7, 3)); // 广场顶排、正对寺门开口(6,3)
+        put(&mut w, 1, (8, 3)); // 车下方
+                                // 朝上推 → 前方(6,3)是大殿，行政墙挡住 → 垂直弹开，绝不进大殿
+        assert!(matches!(w.handle(1, Key::Up), Action::Redraw));
+        let c = w.cart.as_ref().unwrap().at;
+        assert!(c.0 >= PLAZA_TOP, "车没进大殿，实际 {c:?}");
+        assert_eq!(c, (7, 2), "往可走的一侧弹开（(7,4)是香炉）");
+    }
+
+    #[test]
+    fn cart_pushed_outside_returns_to_courtyard() {
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((17, 4)); // 下院底门开口
+        put(&mut w, 1, (16, 4)); // 车上方
+                                 // 朝下推 → 越过底门出寺 → 车回到出生那几行随机位置
+        assert!(matches!(w.handle(1, Key::Down), Action::Redraw));
+        let c = w.cart.as_ref().unwrap().at;
+        assert!(COURTYARD_ROWS.contains(&c.0), "回到出生那几行，实际 {c:?}");
+        assert_ne!(c, (17, 4), "不在原地");
+        assert_eq!(w.pilgrims[&1].at, (17, 4), "人进到车原来那格");
+    }
+
+    #[test]
+    fn walk_hint_only_before_first_move() {
+        let mut w = World::default();
+        w.join(1, 0); // 生成在广场中央，闲着没动
+        assert!(w.render(1).contains("方向鍵走動"), "刚进寺给一次走动提示");
+        // 往左挪一步到中性空地
+        assert!(matches!(w.handle(1, Key::Left), Action::Redraw));
+        assert!(!w.render(1).contains("方向鍵走動"), "动过之后不再提示");
+    }
+
+    #[test]
+    fn sky_mark_is_hhmm() {
+        let m = |h: u32, mm: u32| h * 60 + mm;
+        // 没有天气数据时兜底成 ⚡，后面是真实上海时间 HH:MM
+        assert_eq!(sky_mark(m(12, 0)), "⚡  12:00");
+        assert_eq!(sky_mark(m(5, 9)), "⚡  05:09");
+        assert_eq!(sky_mark(m(23, 45)), "⚡  23:45");
+        assert_eq!(sky_mark(m(0, 0)), "⚡  00:00");
+        // 时间钉在视窗上方，绿点在线数跟在后面
+        let mut w = World::default();
+        w.join(1, 0);
+        w.update_npc(m(14, 23));
         let screen = w.render(1);
-        assert!(screen.contains("⚡  午時"), "无天气时兜底 ⚡");
+        assert!(screen.contains("⚡  14:23"), "无天气时兜底 ⚡ + 时间");
         assert!(screen.contains("● 1"), "顶行绿点显示在线数");
     }
 

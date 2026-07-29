@@ -45,6 +45,9 @@ const NEED_TTY: &str = "\
 /// 离廟时切回主屏（备用屏用完退掉，不在终端历史里留痕）、恢复光标，再道别
 const LEAVE: &str = "\x1b[?25h\x1b[?1049l鐘聲遠去 · 慢走 🔔\r\n";
 
+/// 进寺名额满了：回一句劝退再断（此刻还没切备用屏，直接一行即可）
+const CROWDED: &str = "寺中擁擠 · 香客已滿 · 稍後再來 🔔\r\n";
+
 /// 寺庙的猫每隔多久挪一步
 const CAT_STEP: std::time::Duration = std::time::Duration::from_secs(3);
 /// NPC 多久对一次表（到点出现/消失）
@@ -114,19 +117,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         m0 / 60,
         m0 % 60
     );
-    // 「每日一信」的内容由环境变量注入，空则关闭。
+    // 「今日之信」内容由环境变量注入；不再是地图实体，工作人员对话时会先带一句。
     // `fly secrets set XIAOZHONGSI_LETTER='...'` 即可改信，不必改代码。
     let letter = std::env::var("XIAOZHONGSI_LETTER").unwrap_or_default();
+    // 调试（设了 FAKE_MIN）时不自动放车，保证 showcase 的走位确定；
+    // 需要演示时用 XIAOZHONGSI_FAKE_CART="r,c" 把车钉在指定格。
+    let cart_on = std::env::var("XIAOZHONGSI_FAKE_MIN").is_err();
     {
         let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
         w.update_npc(m0);
         w.set_letter_text(letter.clone());
-        w.tick_letter(m0, shanghai_day()); // 若此刻已过 06:00，进程一起就投上今天的信
+        if cart_on {
+            w.tick_cart(m0, shanghai_day());
+        }
+        if let Some(at) = std::env::var("XIAOZHONGSI_FAKE_CART")
+            .ok()
+            .and_then(|s| parse_cell(&s))
+        {
+            w.place_cart(at);
+            println!("[小鐘寺] 購物車 · 調試釘在 {},{}", at.0, at.1);
+        }
+        if let Some(at) = std::env::var("XIAOZHONGSI_FAKE_CAT")
+            .ok()
+            .and_then(|s| parse_cell(&s))
+        {
+            w.pin_cat(at);
+            println!("[小鐘寺] 貓 · 調試釘在 {},{}", at.0, at.1);
+        }
     }
     if letter.trim().is_empty() {
-        println!("[小鐘寺] 每日一信 · 未設 XIAOZHONGSI_LETTER，關閉");
+        println!("[小鐘寺] 今日之信 · 未設 XIAOZHONGSI_LETTER");
     } else {
-        println!("[小鐘寺] 每日一信 · 每天 06:00 投一封");
+        println!("[小鐘寺] 今日之信 · 工作人員對話時先帶一句");
     }
     {
         let world = Arc::clone(&world);
@@ -136,7 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::time::sleep(NPC_REFRESH).await;
                 let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
                 let min = shanghai_min_of_day();
-                let changed = w.update_npc(min) | w.tick_letter(min, shanghai_day());
+                let day = shanghai_day();
+                let changed = w.update_npc(min) | (cart_on && w.tick_cart(min, day));
                 drop(w);
                 if changed {
                     let _ = tick.send(false);
@@ -186,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         println!("[小鐘寺] 天氣 · 每 30 分鐘拉大鐘寺天色（Open-Meteo）");
     } else {
-        println!("[小鐘寺] 天氣 · 調試(FAKE_MIN)下關閉，狀態欄走時辰");
+        println!("[小鐘寺] 天氣 · 調試(FAKE_MIN)下關閉，狀態欄時間走 FAKE_MIN");
     }
 
     // 调试：XIAOZHONGSI_FAKE_WEATHER="is_day,code,cloud,rain" 直接钉死天色，
@@ -202,6 +225,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[小鐘寺] 天氣 · 調試偽造 {icon}");
     }
 
+    // 同时进寺的人数上限（默认 32）。满了不再放新人进寺，而是完成握手后
+    // 回一句「擁擠 · 稍後再來」再断开——名额在真正进寺那刻才占。
+    let max_sessions: usize = std::env::var("XIAOZHONGSI_MAX_SESSIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+    let gate = Arc::new(tokio::sync::Semaphore::new(max_sessions));
+    println!("[小鐘寺] ssh  進寺上限 {max_sessions}");
+
     let temple = Temple {
         counter: Arc::clone(&counter),
         avatars: Arc::clone(&avatars),
@@ -212,24 +244,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         id: 0,
         choosing: None,
         keys: KeyParser::default(),
+        gate: Arc::clone(&gate),
+        permit: None,
     };
 
     let mut tasks = Vec::new();
-
-    // 同时在处理的 SSH 会话上限。满了就直接断开新连接：
-    // 与其所有人一起排队到超时，不如少数被快速拒绝、其余正常撞钟。
-    let max_sessions: usize = std::env::var("XIAOZHONGSI_MAX_SESSIONS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(128);
-    let gate = Arc::new(tokio::sync::Semaphore::new(max_sessions));
-    println!("[小鐘寺] ssh  并发上限 {max_sessions}");
 
     for port in ssh_ports {
         let socket = TcpListener::bind(("0.0.0.0", port)).await?;
         let config = Arc::clone(&config);
         let temple = temple.clone();
-        let gate = Arc::clone(&gate);
         let next_id = Arc::clone(&next_id);
         let world = Arc::clone(&world);
         let tick = tick.clone();
@@ -239,11 +263,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Ok((stream, _)) = socket.accept().await else {
                     continue;
                 };
-                // try_acquire 不排队：满了立刻放弃这个连接
-                let Ok(permit) = Arc::clone(&gate).try_acquire_owned() else {
-                    drop(stream);
-                    continue;
-                };
+                // 一律接进来握手：名额在真正进寺（shell/exec）那刻才占，
+                // 满了则回一句「擁擠 · 稍後再來」再断——所以这里不预先拦。
                 let config = Arc::clone(&config);
                 let mut temple = temple.clone();
                 temple.id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -251,7 +272,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let world = Arc::clone(&world);
                 let tick = tick.clone();
                 tokio::spawn(async move {
-                    let _permit = permit; // 会话结束才归还名额
                     match russh::server::run_stream(config, stream, temple).await {
                         Ok(session) => {
                             let _ = session.await;
@@ -323,6 +343,14 @@ fn fetch_weather_icon() -> Option<&'static str> {
     let is_day = json_num(cur, "is_day")? as u32 == 1;
     let rain = json_num(cur, "rain").unwrap_or(0.0);
     Some(space::weather_icon(is_day, code, cloud, rain))
+}
+
+/// 解析 "r,c" 成格子坐标（调试钉购物车用）。
+fn parse_cell(spec: &str) -> Option<(usize, usize)> {
+    let mut it = spec.split(',');
+    let r = it.next()?.trim().parse().ok()?;
+    let c = it.next()?.trim().parse().ok()?;
+    Some((r, c))
 }
 
 /// 调试用：把 "is_day,code,cloud,rain" 走真实映射得到天色图标。
@@ -467,6 +495,10 @@ struct Temple {
     choosing: Option<Choosing>,
     /// 按键残段缓冲（方向键 CSI 可能跨多次 data）
     keys: KeyParser,
+    /// 进寺名额闸门，全场共享。满了新人进不来。
+    gate: Arc<tokio::sync::Semaphore>,
+    /// 本次会话占住的名额；进寺时取，离寺/断线时随本结构体一起归还。
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// 克隆出来的是一份全新会话：共享的东西继续共享，身份与状态一律归零
@@ -482,6 +514,8 @@ impl Clone for Temple {
             id: 0,
             choosing: None,
             keys: KeyParser::default(),
+            gate: Arc::clone(&self.gate),
+            permit: None,
         }
     }
 }
@@ -555,11 +589,7 @@ impl Handler for Temple {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
-        if self.has_pty && self.fingerprint.is_some() {
-            self.enter_space(channel, session)
-        } else {
-            self.turn_away(channel, session)
-        }
+        self.try_enter(channel, session)
     }
 
     /// `ssh xiaozhongsi.sh <命令>` 也照常连入：命令一律忽略，不代撞、不谢客，
@@ -571,11 +601,7 @@ impl Handler for Temple {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
-        if self.has_pty && self.fingerprint.is_some() {
-            self.enter_space(channel, session)
-        } else {
-            self.turn_away(channel, session)
-        }
+        self.try_enter(channel, session)
     }
 
     /// 交互空间的按键都从这里进来
@@ -608,6 +634,7 @@ impl Handler for Temple {
                     }
                     Choose::Leave => {
                         self.choosing = None;
+                        self.permit = None; // 选头像就走，名额马上还回去
                         session.data(channel, LEAVE.as_bytes().to_vec())?;
                         session.exit_status_request(channel, 0)?;
                         session.eof(channel)?;
@@ -661,6 +688,7 @@ impl Handler for Temple {
                         .unwrap_or_else(|e| e.into_inner())
                         .leave(self.id);
                     let _ = self.tick.send(false);
+                    self.permit = None; // 离寺，名额马上还回去
                     session.data(channel, LEAVE.as_bytes().to_vec())?;
                     session.exit_status_request(channel, 0)?;
                     session.eof(channel)?;
@@ -859,6 +887,27 @@ impl Temple {
         session.eof(channel)?;
         session.close(channel)?;
         Ok(())
+    }
+
+    /// 该进寺了：先看有没有终端和公钥，再抢一个名额。抢到就进，
+    /// 抢不到（满员）就回一句「擁擠 · 稍後再來」再断。
+    fn try_enter(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), russh::Error> {
+        if !(self.has_pty && self.fingerprint.is_some()) {
+            return self.turn_away(channel, session);
+        }
+        match Arc::clone(&self.gate).try_acquire_owned() {
+            Ok(permit) => {
+                self.permit = Some(permit); // 进寺期间一直握着，离寺/断线归还
+                self.enter_space(channel, session)
+            }
+            Err(_) => {
+                session.data(channel, CROWDED.as_bytes().to_vec())?;
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+                Ok(())
+            }
+        }
     }
 }
 

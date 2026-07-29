@@ -1,0 +1,79 @@
+name: cart
+
+# 单独演示购物车：推着走、撞墙弹开、撞大殿行政墙、推出离口回出生行。
+# 线上购物车每天随机落点；这里用 XIAOZHONGSI_FAKE_CART="r,c" 把车钉死好复现。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build
+
+      - name: 购物车 · 推着走 / 撞墙殿树火猫 / 推出离口
+        run: |
+          # cseg：单会话推车。$5 可选，给猫钉位（XIAOZHONGSI_FAKE_CAT）
+          cseg() {
+            local fc="$1" steps="$2" title="$3" want="$4" cat="${5:-}"
+            printf '::group::%s\n' "$title"
+            fuser -k -n tcp 2222 >/dev/null 2>&1 || true; sleep 1
+            rm -rf /tmp/cart
+            ssh-keygen -t ed25519 -N '' -f /tmp/cck -q 2>/dev/null || true
+            XIAOZHONGSI_DATA_DIR=/tmp/cart HTTP_PORT=8080 SSH_PORT=2222 \
+              XIAOZHONGSI_FAKE_MIN=750 XIAOZHONGSI_FAKE_CART="$fc" \
+              ${cat:+XIAOZHONGSI_FAKE_CAT="$cat"} \
+              ./target/debug/xiaozhongsi > /tmp/cart.log 2>&1 &
+            local pid=$!
+            timeout 20 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.4; done' || true
+            python3 ci/drive.py --host 127.0.0.1 --port 2222 --key /tmp/cck --settle 0.4 \
+              --steps "$steps" --expect "$want" \
+              || echo "（未全部命中，看上方畫面即可）"
+            kill "$pid" 2>/dev/null || true
+            echo '::endgroup::'
+          }
+          # ① 车钉在 (12,4)：走到左侧、按空格看提示、朝右推——人和车一起右移
+          cseg "12,4" "down,down,left,down,space,right" "① 推着走（人和车一起右移）" 推得動
+          # ② 车钉在 (12,1) 紧挨左墙：从右侧朝左推——车撞墙往上/下弹开
+          cseg "12,1" "down,down,down,left,left,left" "② 撞墙弹开（垂直方向）" 購物車在側
+          # ③ 车钉在 (7,3) 正对寺门：从下方朝上推——大殿行政墙挡住，往侧面弹开，进不了殿
+          cseg "7,3" "up,left,up" "③ 撞大殿·行政墙弹开（进不了大殿）" 購物車在側
+          # ⑤ 车钉在树上方 (13,4)：朝下推撞树 🌳——垂直弹开
+          cseg "13,4" "down,down,down,down" "⑤ 撞树弹开 🌳" 老樹在側
+          # ⑥ 车钉在香炉下方 (8,4)：朝上推撞火 🔥——垂直弹开
+          cseg "8,4" "up" "⑥ 撞香炉火弹开 🔥" 香爐在前
+          # ⑦ 车钉在 (10,5)、猫钉在 (10,6)：朝右推撞猫 🐱——垂直弹开
+          cseg "10,5" "down,right" "⑦ 撞猫弹开 🐱" 貓在側 "10,6"
+          # ④ 车钉在下院底门 (17,3)：朝下推出寺——车回到出生那几行随机位置
+          cseg "17,3" "left,down,down,down,down,down,down,down,down" "④ 推出離口·回出生行" 🛒
+
+      - name: 购物车 · 撞人弹开 🧑（两人连入）
+        run: |
+          # 车钉在出生点 (9,4)：占位者落在 (8,4)，推车者落在 (9,3)；
+          # 推车者绕到车下方朝上推，车撞到占位者那个「人」→ 垂直弹开。
+          fuser -k -n tcp 2222 >/dev/null 2>&1 || true; sleep 1
+          rm -rf /tmp/cart
+          ssh-keygen -t ed25519 -N '' -f /tmp/hk -q 2>/dev/null || true
+          ssh-keygen -t ed25519 -N '' -f /tmp/pk -q 2>/dev/null || true
+          XIAOZHONGSI_DATA_DIR=/tmp/cart HTTP_PORT=8080 SSH_PORT=2222 \
+            XIAOZHONGSI_FAKE_MIN=750 XIAOZHONGSI_FAKE_CART=9,4 \
+            ./target/debug/xiaozhongsi > /tmp/cart.log 2>&1 &
+          pid=$!
+          timeout 20 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.4; done' || true
+          python3 ci/cart_bump.py --host 127.0.0.1 --port 2222 \
+            --holder-key /tmp/hk --pusher-key /tmp/pk \
+            --pusher-steps down,right,up --expect 購物車在側 \
+            || echo "（未命中，看上方畫面即可：车撞到人往侧面弹开）"
+          kill "$pid" 2>/dev/null || true
+
+      - name: 收尾
+        if: always()
+        run: fuser -k -n tcp 2222 8080 >/dev/null 2>&1 || true

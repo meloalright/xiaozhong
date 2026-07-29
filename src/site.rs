@@ -35,7 +35,7 @@ pub fn route(path: &str, user_agent: &str) -> (u16, &'static str, String) {
     }
 }
 
-const TEXT_HOME: &str = "終端裡的小鐘寺 · ssh xiaozhongsi.sh 進寺燒香撞鐘撸貓 🐱🔥🔔\n";
+const TEXT_HOME: &str = "終端裡的小鐘寺 · ssh xiaozhongsi.sh\n";
 
 fn html_home() -> String {
     r####"<!doctype html>
@@ -44,7 +44,7 @@ fn html_home() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>終端裡的小鐘寺</title>
-<meta name="description" content="終端裡的小鐘寺 · ssh xiaozhongsi.sh 進寺燒一炷香撞一記鐘撸一把貓 🐱🔥🔔">
+<meta name="description" content="ssh xiaozhongsi.sh">
 <link rel="icon" href="/favicon.svg">
 <style>
   :root { color-scheme: dark; }
@@ -108,7 +108,7 @@ fn html_home() -> String {
   <script async defer src="https://buttons.github.io/buttons.js"></script>
 <main>
   <h1>終端裡的小鐘寺 🔔</h1>
-  <p class="lead">在終端運行如下命令 · 進寺燒香撞鐘撸貓</p>
+  <p class="lead">在終端運行如下命令</p>
   <code class="cmd"><span class="prompt">$ </span><span id="line"><b>ssh</b> xiaozhongsi.sh</span><button id="copy" class="copy" type="button" aria-label="複製指令"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button></code>
   <p class="copied" id="copied" aria-live="polite">已複製到剪貼簿</p>
 </main>
