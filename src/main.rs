@@ -117,11 +117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         m0 / 60,
         m0 % 60
     );
-    // 「今日之信」内容由环境变量注入；不再是地图实体，工作人员对话时会先带一句。
+    // 「今日之信」内容由环境变量注入；撞钟后再按一次键会把信亮一下，再按才起身。
     // `fly secrets set XIAOZHONGSI_LETTER='...'` 即可改信，不必改代码。
     let letter = std::env::var("XIAOZHONGSI_LETTER").unwrap_or_default();
     // 调试（设了 FAKE_MIN）时不自动放车，保证 showcase 的走位确定；
-    // 需要演示时用 XIAOZHONGSI_FAKE_CART="r,c" 把车钉在指定格。
+    // 需要演示时用 XIAOZHONGSI_FAKE_CART="r,c" 钉在指定格。
     let cart_on = std::env::var("XIAOZHONGSI_FAKE_MIN").is_err();
     {
         let mut w = world.lock().unwrap_or_else(|e| e.into_inner());
@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if letter.trim().is_empty() {
         println!("[小鐘寺] 今日之信 · 未設 XIAOZHONGSI_LETTER");
     } else {
-        println!("[小鐘寺] 今日之信 · 工作人員對話時先帶一句");
+        println!("[小鐘寺] 今日之信 · 撞鐘後再按鍵亮一下 · 再按起身");
     }
     {
         let world = Arc::clone(&world);

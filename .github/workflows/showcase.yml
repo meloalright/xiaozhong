@@ -36,55 +36,21 @@ jobs:
             --expect 鐘聲遠去
           kill "$(cat /tmp/srv.pid)" 2>/dev/null || true
 
-      - name: 各时段 NPC 交互（上海时间 · 用 FAKE_MIN 钉死时刻）
+      - name: 幽靈 · 深夜 00:00–02:00 鐘右（唯一的 NPC）
         run: |
-          # seg: $1=当天分钟  $2=标题  $3=按键序列  $4..=期望子串（非致命，主要为了 show 画面）
-          seg() {
-            local fm="$1" title="$2" steps="$3"; shift 3
-            printf '::group::%s  ·  視作 %02d:%02d\n' "$title" $((fm/60)) $((fm%60))
-            fuser -k -n tcp 2222 >/dev/null 2>&1 || true; sleep 1
-            rm -rf "/tmp/d$fm"
-            ssh-keygen -t ed25519 -N '' -f "/tmp/k$fm" -q 2>/dev/null || true
-            XIAOZHONGSI_DATA_DIR="/tmp/d$fm" HTTP_PORT=8080 SSH_PORT=2222 XIAOZHONGSI_FAKE_MIN=$fm \
-              ./target/debug/xiaozhongsi > "/tmp/s$fm.log" 2>&1 &
-            local pid=$!
-            timeout 20 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.4; done' || true
-            local exp=(); local e; for e in "$@"; do exp+=(--expect "$e"); done
-            python3 ci/drive.py --host 127.0.0.1 --port 2222 --key "/tmp/k$fm" --settle 0.5 \
-              --steps "$steps" "${exp[@]}" || echo "（本段未全部命中，看上方画面即可）"
-            kill "$pid" 2>/dev/null || true
-            echo '::endgroup::'
-          }
-          T='down,down,down,down,left,down,down,space'  # 下到下院、树旁大爷
-          Tw='down,down,down,down,left,down,down'        # 同上但不搭话（看空位）
-          H='up,left,up,up,up,up,up,space'               # 上到庙堂、大爷旁
-          V='left,space'                                 # 广场里志愿者旁
-          G='up,left,up,up,up,up,up,up,up,right,right,space' # 上到庙堂、钟右侧幽灵旁
-          seg 480  "① 06:00–10:00 大爺·樹下·早問候"   "$T"  🙋 早啊
-          seg 660  "② 10:00–12:00 大爺·樹下·問午飯"   "$T"  🙋 中午
-          seg 750  "③ 12:00–14:00 午休·下院沒人"       "$Tw" 🌳
-          seg 900  "④ 14:00–16:00 大爺·廟堂·下午忙"   "$H"  🙋 下午
-          seg 1020 "⑤ 16:00–18:00 大爺·廟堂·快下班"   "$H"  🙋 下班
-          seg 1140 "⑥ 18:00–21:30 志願者·廣場"         "$V"  💇 志願者
-          seg 1350 "⑦ 02:00–06:00 / 21:30 起 深夜·沒人" left  "●"
-          seg 60   "⑧ 00:00–02:00 幽靈·鐘右·只吐省略號" "$G"  👻 ......
-
-      - name: 工作人员对话 · 先说今日之信，再说本来的话（按两下）
-        run: |
-          # 08:00 大爷在树下；注入今日之信。搭话：第一下先带一句信，第二下才说本来的话。
+          # 工作人员已撤，只剩深夜钟右的幽灵，搭话只吐省略号
           fuser -k -n tcp 2222 >/dev/null 2>&1 || true; sleep 1
-          rm -rf /tmp/talk
-          ssh-keygen -t ed25519 -N '' -f /tmp/tk -q 2>/dev/null || true
-          XIAOZHONGSI_DATA_DIR=/tmp/talk HTTP_PORT=8080 SSH_PORT=2222 XIAOZHONGSI_FAKE_MIN=480 \
-            XIAOZHONGSI_LETTER='今天是隔壁活動日' \
-            ./target/debug/xiaozhongsi > /tmp/talk.log 2>&1 &
+          rm -rf /tmp/ghost
+          ssh-keygen -t ed25519 -N '' -f /tmp/gk -q 2>/dev/null || true
+          XIAOZHONGSI_DATA_DIR=/tmp/ghost HTTP_PORT=8080 SSH_PORT=2222 XIAOZHONGSI_FAKE_MIN=60 \
+            ./target/debug/xiaozhongsi > /tmp/ghost.log 2>&1 &
           pid=$!
           timeout 20 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; do sleep 0.4; done' || true
-          # 下到大爷旁(16,4)，按两下空格
-          python3 ci/drive.py --host 127.0.0.1 --port 2222 --key /tmp/tk --settle 0.5 \
-            --steps down,down,down,down,left,down,down,space,space \
-            --expect 今天是隔壁活動日 --expect 早啊 \
-            || echo "（未全部命中，看上方画面：先信后话）"
+          # 上到庙堂、走到钟右侧幽灵旁，按空格搭话
+          python3 ci/drive.py --host 127.0.0.1 --port 2222 --key /tmp/gk --settle 0.5 \
+            --steps up,left,up,up,up,up,up,up,up,right,right,space \
+            --expect "👻" --expect "......" \
+            || echo "（未全部命中，看上方画面即可）"
           kill "$pid" 2>/dev/null || true
 
       - name: 天色 × 时辰（伪造天气 · 大钟寺实况本由 Open-Meteo 驱动）

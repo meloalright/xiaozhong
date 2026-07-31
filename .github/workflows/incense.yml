@@ -1,20 +1,20 @@
-name: bell-probe
+name: incense-probe
 
-# 每小时第 01 分真连一次线上 ssh xiaozhongsi.sh：走到钟前撞钟，再按键听自己念一遍
-# 今日之信，最后离寺。用固定探测公钥（secret PROBE_SSH_KEY_B64），线上统计里只算「同一位香客」。
-# 烧香探针是另一个单独的 workflow（incense.yml），两者分开、互不干扰。
+# 每小时第 02 分真连一次线上 ssh xiaozhongsi.sh：走到香炉前烧一炷香，再离寺。
+# 用固定探测公钥（secret PROBE_SSH_KEY_B64），线上统计里只算「同一位香客」。
+# 敲钟探针是另一个单独的 workflow（probe.yml），两者分开、互不干扰。
 on:
   schedule:
-    # 每个小时的第 01 分钟跑一次（全天 24 小时）。
-    - cron: "1 * * * *"
+    # 每个小时的第 02 分钟跑一次（全天 24 小时），错开敲钟探针的第 01 分。
+    - cron: "2 * * * *"
   workflow_dispatch:
 
 concurrency:
-  group: bell-probe
+  group: incense-probe
   cancel-in-progress: false
 
 jobs:
-  bell-probe:
+  incense-probe:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,12 +45,10 @@ jobs:
             exit 1
           fi
 
-      - name: 探测 · 线上撞钟 / 离寺
-        # --pick 5 = 第 6 个头像 👷（固定这位的样子；只有这把 key 第一次进寺才真挑一次）。
-        # 走位：左挪一格到第 3 列，一路向上到钟左侧 (0,3) 撞钟。
-        # 撞钟后再按一次键会自言自语念今日之信、再按才起身，所以连按两下（enter,enter）
-        # 稳稳起身——不论线上有没有配 XIAOZHONGSI_LETTER 都成立，最后四步向左走出寺门。
+      - name: 探测 · 线上烧香 / 离寺
+        # --pick 5 = 第 6 个头像 👷（和敲钟探针同一把 key，同一位香客）。
+        # 走位：向上一格到香炉正下方 (8,4) 烧香、起身，再左上绕开香炉走到 (7,0) 出寺门。
         run: |
           python3 ci/drive.py --host xiaozhongsi.sh --port 22 --key /tmp/pk --settle 1.0 --pick 5 \
-            --steps left,up,up,up,up,up,up,up,up,up,space,enter,enter,left,left,left,left \
-            --expect 按空格撞鐘 --expect 今天第 --expect 鐘聲遠去
+            --steps up,space,enter,left,up,left,left,left,left \
+            --expect 按空格燒香 --expect 今天第 --expect 鐘聲遠去

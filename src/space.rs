@@ -52,13 +52,6 @@ const TREE: &str = "🌳";
 const TREE_AT: (usize, usize) = (14, 4);
 /// 看树时弹的一句
 const TREE_LINE: &str = "這是寺裡的一棵老樹";
-/// 安保大爷 / 志愿者的头像（都是单码位）
-const GUARD: &str = "🙋";
-const VOLUNTEER: &str = "💇";
-/// NPC 的几个固定落点
-const GUARD_TREE: (usize, usize) = (15, 4); // 平时在下院、树下
-const GUARD_HALL: (usize, usize) = (3, 2); // 14–16 点巡到庙堂
-const VOLUNTEER_AT: (usize, usize) = (9, 2); // 夜里的志愿者在广场
 /// 深夜 0–2 点，钟右侧飘着一只幽灵，能搭话但只吐省略号
 const GHOST: &str = "👻";
 const GHOST_AT: (usize, usize) = (0, 5); // 钟 (0,4) 的右邻
@@ -66,6 +59,12 @@ const GHOST_AT: (usize, usize) = (0, 5); // 钟 (0,4) 的右邻
 const COURTYARD_ROWS: std::ops::RangeInclusive<usize> = START_AT.0..=TREE_AT.0; // 9..=14
 /// 出生点到树之间随机出现的购物车。单码位 🛒，有碰撞、能被推着走，一直在场。
 const CART: &str = "🛒";
+/// 两人一起祈祷时，双方都化作一簇星光 ✨，直到任一人按键起身。
+const PRAY_SPARKLE: &str = "✨";
+/// 把院子里的购物车往大殿里推、被行政墙挡住时的灰字提示（不需起身，下次行动即消）。
+const CART_HALL_HINT: &str = "購物車不能推進室內";
+/// 正在推车时的灰字提示（同样一次性，下次行动即消）。
+const PUSH_HINT: &str = "你正在推車";
 /// 空庭：地面留白，只有星光、钟和人
 const FLOOR: &str = "  ";
 /// 窗棂格子墙
@@ -109,6 +108,16 @@ const CENSER_AT: (usize, usize) = (7, 4);
 /// 进寺时的落脚点：香炉正下方两格，广场中央偏上
 const START_AT: (usize, usize) = (9, 4);
 
+/// 庙外的几个出口开口：香炉那排左右两端 + 树下底门三格。
+/// 车/猫撞墙弹开时用来判断哪个垂直方向「更远离出口」，优先往那边弹。
+const EXITS: [(usize, usize); 5] = [
+    (CENSER_AT.0, 0),
+    (CENSER_AT.0, W - 1),
+    (H - 1, 3),
+    (H - 1, 4),
+    (H - 1, 5),
+];
+
 pub type Id = u64;
 
 #[derive(Clone)]
@@ -121,14 +130,18 @@ struct Pilgrim {
     burning: bool,
     /// 正在撸猫
     petting: bool,
-    /// 正在和 NPC 搭话
+    /// 正在搭话（和幽灵）
     talking: bool,
-    /// 和工作人员对话的进度：1=刚说完今日之信、还有本来的话要说；否则 0
-    talk_stage: u8,
+    /// 正在独自祈祷（自己化作 ✨、自己看到一行祈祷词；不打扰旁人）
+    praying: bool,
+    /// 撞钟后是否已经亮过今日之信——第一次按键亮信、第二次才起身
+    bell_letter_shown: bool,
     /// 是否挪过步——刚进寺没动过时给一次走动提示，动过就不再提示
     moved: bool,
     /// 撞钟/烧香/撸猫/搭话后要显示给本人的那句话
     blessing: Option<String>,
+    /// 一次性灰字提示（比如把车往大殿里推）：不需起身，下一拍一行动就消。
+    hint: Option<&'static str>,
 }
 
 /// 每天出现的购物车。落在随机空地，有碰撞，能被人推着走。
@@ -145,23 +158,8 @@ struct Npc {
     line: &'static str,
 }
 
-/// 按上海时间「当天第几分钟」返回此刻值守的 NPC（没有就 None）。纯函数，好测。
+/// 按上海时间「当天第几分钟」返回此刻的 NPC。现在只有深夜 0–2 点钟右侧的幽灵。
 fn npc_for(min_of_day: u32) -> Option<Npc> {
-    let guard = |at, line| {
-        Some(Npc {
-            at,
-            glyph: GUARD,
-            line,
-        })
-    };
-    // 对话文案只放内容，显示时会在前面拼上「头像：」体现是谁说的
-    let volunteer = || {
-        Some(Npc {
-            at: VOLUNTEER_AT,
-            glyph: VOLUNTEER,
-            line: "這個點兒沒什麼人，我這志願者也落得自在。",
-        })
-    };
     match min_of_day / 60 {
         // 0–2 点：钟右侧的幽灵，搭话只吐省略号
         0..=1 => Some(Npc {
@@ -169,13 +167,6 @@ fn npc_for(min_of_day: u32) -> Option<Npc> {
             glyph: GHOST,
             line: "......",
         }),
-        6..=9 => guard(GUARD_TREE, "早啊，這麼早就來啦？"),
-        10..=11 => guard(GUARD_TREE, "快到中午了哦。"),
-        // 12–13：午休，无人
-        14..=15 => guard(GUARD_HALL, "下午好，寺裡隨便轉轉，別客氣。"),
-        16..=17 => guard(GUARD_HALL, "等下就快下班了。"),
-        18..=20 => volunteer(),
-        21 if min_of_day < 21 * 60 + 30 => volunteer(),
         _ => None,
     }
 }
@@ -197,6 +188,8 @@ pub struct World {
     cart: Option<Cart>,
     /// 调试：把猫钉住不再溜达（给 showcase 演示「推车撞猫」用）。
     cat_pinned: bool,
+    /// 猫刚被推动过（腿脚受了外力）：下一拍定时随机溜达先跳过一轮，缓一缓再走。
+    cat_shoved: bool,
 }
 
 impl Default for World {
@@ -210,6 +203,7 @@ impl Default for World {
             weather_icon: None,
             cart: None,
             cat_pinned: false,
+            cat_shoved: false,
         }
     }
 }
@@ -241,9 +235,11 @@ impl World {
                 burning: false,
                 petting: false,
                 talking: false,
-                talk_stage: 0,
+                praying: false,
+                bell_letter_shown: false,
                 moved: false,
                 blessing: None,
+                hint: None,
             },
         );
     }
@@ -354,7 +350,8 @@ impl World {
     }
 
     /// 朝车按方向键：把车往同方向推一格，人跟进车原来那格。
-    /// 车前方是墙（含地图边界/树）就随机往垂直方向弹开；两侧都堵就推不动。
+    /// 车前方是墙（含地图边界/树/火/人）就随机往垂直方向弹开；两侧都堵就推不动。
+    /// 前方正好是猫，则连猫一起推走（猫按和车一样的规则动/弹/重生）。
     fn push_cart(&mut self, id: Id, cart_at: (usize, usize), key: Key) -> Action {
         let (dr, dc): (isize, isize) = match key {
             Key::Up => (-1, 0),
@@ -364,22 +361,146 @@ impl World {
             _ => return Action::Idle,
         };
         let (cr, cc) = (cart_at.0 as isize, cart_at.1 as isize);
-        match self.on_grid((cr + dr, cc + dc)) {
+        let front = self.on_grid((cr + dr, cc + dc));
+        // 撞的正是「行政墙」（前方那格本可走，只是不许车进大殿）？决定用哪句提示。
+        let into_hall =
+            matches!(front, Some(cell) if cell.0 < PLAZA_TOP && MAP[cell.0][cell.1] == '.');
+        let action = match front {
             // 前方是车能占的空地：正常推，车往前、人进到车原来那格
             Some(cell) if self.cart_free(cell) => {
                 self.cart = Some(Cart { at: cell });
                 self.move_into(id, cart_at);
                 Action::Redraw
             }
-            // 前方有任何碰撞体（人/猫/火/墙/树/信/大殿行政墙）：沿碰撞法线的垂直方向弹开
+            // 前方正好是猫：先把猫朝同方向推开；猫让开了那格，车就补进去
+            Some(cell) if cell == self.cat_at => {
+                if self.shove_cat(dr, dc) {
+                    self.cart = Some(Cart { at: cell });
+                    self.move_into(id, cart_at);
+                    Action::Redraw
+                } else {
+                    // 猫两侧也都堵着，推不动：车照旧弹开
+                    self.bounce_cart(id, cart_at, dr, dc)
+                }
+            }
+            // 前方有其它碰撞体（人/火/墙/树/大殿行政墙）：沿碰撞法线的垂直方向弹开
             Some(_) => self.bounce_cart(id, cart_at, dr, dc),
-            // 推出了地图边界＝出寺：车回到出生那几行随机位置，人进到车原来那格
+            // 推出了地图边界＝出寺：按出口决定重生点，人进到车原来那格
             None => {
-                self.cart = self.random_courtyard_cell().map(|at| Cart { at });
+                let at = self.respawn_after_exit(cart_at);
+                self.cart = Some(Cart { at });
                 self.move_into(id, cart_at);
                 Action::Redraw
             }
+        };
+        // 只要这一下真推动了（Redraw），底下点一行灰字：撞行政墙用专门那句，否则「你正在推車」。
+        if matches!(action, Action::Redraw) {
+            let hint = if into_hall { CART_HALL_HINT } else { PUSH_HINT };
+            if let Some(p) = self.pilgrims.get_mut(&id) {
+                p.hint = Some(hint);
+            }
         }
+        action
+    }
+
+    /// 被推出寺门后的重生点（车和猫共用）：
+    /// 从香炉两侧（第 7 排左右开口）横着推出去的，落到树下两格（被占就退到它紧邻空格）；
+    /// 从树下底门竖着推出去的，落到香炉左边三格 / 右边三格及其周围里随机一个空地。
+    fn respawn_after_exit(&self, from: (usize, usize)) -> (usize, usize) {
+        if from.0 == CENSER_AT.0 {
+            // 香炉那排出去 → 树下两格；被占就退到它紧邻的空格
+            self.free_at_or_near((TREE_AT.0 + 2, TREE_AT.1))
+        } else {
+            // 树下门出去 → 香炉左三格/右三格及周围随机一个出生点
+            let flanks = [
+                (CENSER_AT.0, CENSER_AT.1 - 3),
+                (CENSER_AT.0, CENSER_AT.1 + 3),
+            ];
+            self.random_near(&flanks)
+                .or_else(|| self.random_courtyard_cell())
+                .unwrap_or(START_AT)
+        }
+    }
+
+    /// 给定几个「首选格」，把它们连同各自的上下左右邻格凑成候选，随机挑一个车能落的空地。
+    /// 离任何出口不足两格的（含出口本身、及紧挨出口的 (7,1)/(7,7)）都不作备选——
+    /// 否则一重生就贴着口、一推又出去了。
+    fn random_near(&self, targets: &[(usize, usize)]) -> Option<(usize, usize)> {
+        let mut cells: Vec<(usize, usize)> = Vec::new();
+        for &t in targets {
+            let (tr, tc) = (t.0 as isize, t.1 as isize);
+            for (dr, dc) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+                if let Some(cell) = self.on_grid((tr + dr, tc + dc)) {
+                    if self.cart_free(cell) && dist_to_exit(cell) >= 2 && !cells.contains(&cell) {
+                        cells.push(cell);
+                    }
+                }
+            }
+        }
+        if cells.is_empty() {
+            None
+        } else {
+            Some(cells[rand::random_range(0..cells.len())])
+        }
+    }
+
+    /// 首选格空着就落它；被占就退到它上下左右第一个空格；四邻都满才回落下院随机空地。
+    fn free_at_or_near(&self, t: (usize, usize)) -> (usize, usize) {
+        if self.cart_free(t) {
+            return t;
+        }
+        let (tr, tc) = (t.0 as isize, t.1 as isize);
+        for (dr, dc) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            if let Some(cell) = self.on_grid((tr + dr, tc + dc)) {
+                if self.cart_free(cell) {
+                    return cell;
+                }
+            }
+        }
+        self.random_courtyard_cell().unwrap_or(START_AT)
+    }
+
+    /// 把猫朝 (dr,dc) 推一格，规则和推车一模一样：前方空地就走过去；撞墙/人/树/火/大殿行政墙
+    /// 就沿垂直方向弹一格（优先离出口更远的一侧）；推出地图边界就在下院重生。
+    /// 猫离开了原来那格（走开/弹开/重生）就返回 true，好让车补进它原来那格。
+    fn shove_cat(&mut self, dr: isize, dc: isize) -> bool {
+        let (kr, kc) = (self.cat_at.0 as isize, self.cat_at.1 as isize);
+        let moved = match self.on_grid((kr + dr, kc + dc)) {
+            // 前方猫能站：猫走过去
+            Some(cell) if self.cart_free(cell) => {
+                self.cat_at = cell;
+                true
+            }
+            // 前方是碰撞体：沿垂直方向弹一格（优先离出口更远的一侧）；两侧都堵就纹丝不动
+            Some(_) => {
+                let perp: [(isize, isize); 2] = if dr != 0 {
+                    [(0, -1), (0, 1)]
+                } else {
+                    [(-1, 0), (1, 0)]
+                };
+                let opts: Vec<(usize, usize)> = perp
+                    .iter()
+                    .filter_map(|(pr, pc)| self.on_grid((kr + pr, kc + pc)))
+                    .filter(|&cell| self.cart_free(cell))
+                    .collect();
+                if opts.is_empty() {
+                    false
+                } else {
+                    self.cat_at = farthest_from_exit(&opts);
+                    true
+                }
+            }
+            // 推出了地图边界：按出口决定重生点（和车共用规则）
+            None => {
+                self.cat_at = self.respawn_after_exit(self.cat_at);
+                true
+            }
+        };
+        // 猫被外力挪动了：给它标记一下，下一拍定时溜达先跳过一轮
+        if moved {
+            self.cat_shoved = true;
+        }
+        moved
     }
 
     /// 车能占的格：不进大殿(row<PLAZA_TOP)，且是空地、没别的东西。
@@ -387,8 +508,31 @@ impl World {
         at.0 >= PLAZA_TOP && self.cell_free(at)
     }
 
-    /// 车撞上碰撞体（墙/树/火/人/猫/信/大殿）：沿碰撞法线的垂直方向随机弹一格；
-    /// 两侧都堵着就纹丝不动。
+    /// 猫能不能朝 (dr,dc) 被推走（走开/弹开/重生任一成立）。和 shove_cat 的判定一致，
+    /// 只是不动手——给推车弹开时判断「那个垂直方向虽是猫、但猫能让开」用。
+    fn cat_shovable(&self, dr: isize, dc: isize) -> bool {
+        let (kr, kc) = (self.cat_at.0 as isize, self.cat_at.1 as isize);
+        match self.on_grid((kr + dr, kc + dc)) {
+            Some(cell) if self.cart_free(cell) => true, // 前方能站，走过去
+            Some(_) => {
+                // 前方是碰撞体：垂直方向有一格能站，就能弹开
+                let perp: [(isize, isize); 2] = if dr != 0 {
+                    [(0, -1), (0, 1)]
+                } else {
+                    [(-1, 0), (1, 0)]
+                };
+                perp.iter().any(|(pr, pc)| {
+                    self.on_grid((kr + pr, kc + pc))
+                        .is_some_and(|c| self.cart_free(c))
+                })
+            }
+            None => true, // 出界能重生
+        }
+    }
+
+    /// 车撞上碰撞体（墙/树/火/人/大殿）：沿碰撞法线的垂直方向弹一格，优先弹向离出口更远的
+    /// 那一侧（并列最远的随机）；两侧都堵着就纹丝不动。垂直方向那格正好是猫、且猫能被推走，
+    /// 也算一个可弹方向——弹过去时把猫朝同方向推开。
     fn bounce_cart(&mut self, id: Id, cart_at: (usize, usize), dr: isize, _dc: isize) -> Action {
         // 推的是竖向(dr!=0)就往左右弹，推的是横向就往上下弹
         let perp: [(isize, isize); 2] = if dr != 0 {
@@ -397,17 +541,34 @@ impl World {
             [(-1, 0), (1, 0)]
         };
         let (cr, cc) = (cart_at.0 as isize, cart_at.1 as isize);
-        let opts: Vec<(usize, usize)> = perp
+        // 每个可弹方向记 (落点, 那格是不是要先推开的猫)
+        let opts: Vec<((usize, usize), bool)> = perp
             .iter()
-            .filter_map(|(pr, pc)| self.on_grid((cr + pr, cc + pc)))
-            .filter(|&cell| self.cart_free(cell))
+            .filter_map(|&(pr, pc)| {
+                let cell = self.on_grid((cr + pr, cc + pc))?;
+                if self.cart_free(cell) {
+                    Some((cell, false))
+                } else if cell == self.cat_at && self.cat_shovable(pr, pc) {
+                    Some((cell, true))
+                } else {
+                    None
+                }
+            })
             .collect();
         if opts.is_empty() {
             return Action::Idle;
         }
-        self.cart = Some(Cart {
-            at: opts[rand::random_range(0..opts.len())],
-        });
+        // 优先往离出口更远的那一侧弹（并列最远的随机）
+        let cells: Vec<(usize, usize)> = opts.iter().map(|(c, _)| *c).collect();
+        let cell = farthest_from_exit(&cells);
+        // 落点正好是猫那格，就是要先把猫推开的方向
+        let is_cat = cell == self.cat_at;
+        if is_cat {
+            // 车弹进猫那格：先把猫朝同一垂直方向推开，腾出这格
+            let (pr, pc) = (cell.0 as isize - cr, cell.1 as isize - cc);
+            self.shove_cat(pr, pc);
+        }
+        self.cart = Some(Cart { at: cell });
         self.move_into(id, cart_at); // 人进到车原来那格
         Action::Redraw
     }
@@ -497,33 +658,32 @@ impl World {
             return Action::Idle;
         };
 
-        if me.ringing || me.burning || me.petting {
-            // 撞完/上完香/撸完猫按任意键起身，继续自由走动
+        // 上一拍留下的一次性灰字提示，这一拍一行动就消（可能下面又被重新点亮）
+        if me.hint.is_some() {
+            if let Some(p) = self.pilgrims.get_mut(&id) {
+                p.hint = None;
+            }
+        }
+
+        // 撞完/上完香/撸完猫/搭完话/祈祷完，按任意键（含空格）起身，继续自由走动。
+        if me.ringing || me.burning || me.petting || me.talking || me.praying {
+            // 撞钟后第一次按键：若配了今日之信，自己对着自己念一遍（人还起不来），再按才起身。
+            if me.ringing && !me.bell_letter_shown {
+                if let Some(t) = self.letter_text().map(str::to_string) {
+                    if let Some(p) = self.pilgrims.get_mut(&id) {
+                        p.bell_letter_shown = true;
+                        p.blessing = Some(format!("{} 「{}」", avatar_of(me.avatar), t));
+                    }
+                    return Action::Redraw;
+                }
+            }
             if let Some(p) = self.pilgrims.get_mut(&id) {
                 p.ringing = false;
                 p.burning = false;
                 p.petting = false;
-                p.blessing = None;
-            }
-            return Action::Redraw;
-        }
-        if me.talking {
-            // 和工作人员对话：说完信(stage 1)后按空格接着说本来的话；其它键（或已说完）起身
-            if key == Key::Space && me.talk_stage == 1 {
-                if let Some(line) = self
-                    .npc_near(me.at)
-                    .map(|n| format!("{} 「{}」", n.glyph, n.line))
-                {
-                    if let Some(p) = self.pilgrims.get_mut(&id) {
-                        p.talk_stage = 2;
-                        p.blessing = Some(line);
-                    }
-                    return Action::Talk;
-                }
-            }
-            if let Some(p) = self.pilgrims.get_mut(&id) {
                 p.talking = false;
-                p.talk_stage = 0;
+                p.praying = false;
+                p.bell_letter_shown = false;
                 p.blessing = None;
             }
             return Action::Redraw;
@@ -531,10 +691,11 @@ impl World {
 
         match key {
             Key::Quit => Action::Leave,
-            // 站在钟左右或正下方按空格：撞钟
+            // 站在钟左右或正下方按空格：撞钟（撞完再按一次键会亮出今日之信，再按才起身）
             Key::Space if can_ring(me.at) => {
                 if let Some(p) = self.pilgrims.get_mut(&id) {
                     p.ringing = true;
+                    p.bell_letter_shown = false;
                 }
                 Action::Ring
             }
@@ -552,21 +713,15 @@ impl World {
                 }
                 Action::Pet
             }
-            // 站在 NPC 身边按空格：搭话。工作人员（大爷/志愿者）每次先带一句今日之信，
-            // 再按一下才说本来的话（按两下）；幽灵、没配信时就单句。
+            // 站在 NPC（幽灵）身边按空格：搭话，弹一句（头像后加引号体现是谁说的）
             Key::Space if self.npc_near(me.at).is_some() => {
-                let n = self.npc_near(me.at).unwrap();
-                let glyph = n.glyph;
-                let npc_line = n.line;
-                let is_staff = glyph != GHOST;
-                let (blessing, stage) = match self.letter_text() {
-                    Some(letter) if is_staff => (format!("{glyph} 「{letter}」"), 1u8),
-                    _ => (format!("{glyph} 「{npc_line}」"), 0u8),
-                };
+                let line = self
+                    .npc_near(me.at)
+                    .map(|n| format!("{} 「{}」", n.glyph, n.line))
+                    .unwrap();
                 if let Some(p) = self.pilgrims.get_mut(&id) {
                     p.talking = true;
-                    p.talk_stage = stage;
-                    p.blessing = Some(blessing);
+                    p.blessing = Some(line);
                 }
                 Action::Talk
             }
@@ -586,6 +741,15 @@ impl World {
                 }
                 Action::Talk
             }
+            // 站在另一个玩家旁按空格：独自祈祷。只有自己化作 ✨、只有自己看到那行祈祷词，
+            // 绝不牵动旁人（免得被人一按就打扰）。
+            Key::Space if self.player_near(id, me.at).is_some() => {
+                if let Some(p) = self.pilgrims.get_mut(&id) {
+                    p.praying = true;
+                    p.blessing = Some("你進行了祈禱 🙏".to_string());
+                }
+                Action::Talk
+            }
             _ => self.step(id, me.at, key),
         }
     }
@@ -597,8 +761,21 @@ impl World {
             .filter(|n| at.0.abs_diff(n.at.0) + at.1.abs_diff(n.at.1) == 1)
     }
 
+    /// 相邻一格上有没有别的玩家；有就返回其 id
+    fn player_near(&self, id: Id, at: (usize, usize)) -> Option<Id> {
+        self.pilgrims
+            .iter()
+            .find(|(&pid, p)| pid != id && at.0.abs_diff(p.at.0) + at.1.abs_diff(p.at.1) == 1)
+            .map(|(&pid, _)| pid)
+    }
+
     /// 猫随机挪一格：只在广场、只走空地、不踩人。挪动了返回 true。
     pub fn wander_cat(&mut self) -> bool {
+        // 刚被推动过：这一拍的定时随机溜达被打断，消掉标记、歇一轮再走
+        if self.cat_shoved {
+            self.cat_shoved = false;
+            return false;
+        }
         // 调试钉住、或正被撸时都定住不走
         if self.cat_pinned || self.anyone_petting() {
             return false;
@@ -690,7 +867,12 @@ impl World {
                     .filter(|(_, p)| p.at == (r, c))
                     .max_by_key(|(pid, _)| u8::from(**pid == id));
                 if let Some((_, p)) = here {
-                    line.push_str(avatar_of(p.avatar));
+                    // 祈祷时化作 ✨，否则显示自己的头像
+                    line.push_str(if p.praying {
+                        PRAY_SPARKLE
+                    } else {
+                        avatar_of(p.avatar)
+                    });
                     continue;
                 }
                 if (r, c) == self.cat_at {
@@ -745,7 +927,7 @@ impl World {
         let mut out = String::from("\x1b[2J\x1b[H\x1b[?25l\r\n");
         // 顶行：天气+时辰，后跟绿色 ● + 在线连接玩家数；空一行再接画面
         out.push_str(&format!(
-            "  \x1b[2m{}\x1b[0m   \x1b[32m● {}\x1b[0m\r\n\r\n",
+            "\x1b[2m{}\x1b[0m  \x1b[2m寺中 {} 人\x1b[0m\r\n\r\n",
             self.status_mark(),
             self.online()
         ));
@@ -756,7 +938,11 @@ impl World {
 
         out.push_str("\r\n");
         match self.pilgrims.get(&id) {
-            Some(p) if p.ringing || p.burning || p.petting || p.talking => {
+            // 一次性灰字提示（如把车往大殿里推）最优先显示，不需起身，下次行动即消
+            Some(p) if p.hint.is_some() => {
+                out.push_str(&format!("  \x1b[2m{}\x1b[0m\r\n", p.hint.unwrap()));
+            }
+            Some(p) if p.ringing || p.burning || p.petting || p.talking || p.praying => {
                 if let Some(line) = &p.blessing {
                     out.push_str(&format!("  \x1b[33m{line}\x1b[0m\r\n"));
                 }
@@ -773,6 +959,10 @@ impl World {
             Some(p) if can_tree(p.at) => out.push_str("  \x1b[2m🌳 老樹 · 按空格看看\x1b[0m\r\n"),
             Some(p) if self.cart_near(p.at) => {
                 out.push_str("  \x1b[2m🛒 購物車 · 按空格看看\x1b[0m\r\n")
+            }
+            // 身边有别的玩家：可以自己祈祷（不打扰对方）
+            Some(p) if self.player_near(id, p.at).is_some() => {
+                out.push_str("  \x1b[2m🙏 · 按空格祈禱\x1b[0m\r\n")
             }
             // 站在广场下缘，再往下一步就出寺
             Some(p) if p.at.0 == H - 1 => out.push_str("  \x1b[2m↓ 再往下一步 · 即出寺\x1b[0m\r\n"),
@@ -826,6 +1016,26 @@ pub fn weather_icon(is_day: bool, code: u32, cloud: u32, rain: f64) -> &'static 
     } else {
         "🌙" // 晴夜
     }
+}
+
+/// 到最近出口的曼哈顿距离，作为「远离出口」的度量。
+fn dist_to_exit(at: (usize, usize)) -> usize {
+    EXITS
+        .iter()
+        .map(|&(er, ec)| at.0.abs_diff(er) + at.1.abs_diff(ec))
+        .min()
+        .unwrap()
+}
+
+/// 从候选落点里挑离出口最远的一个；并列最远的随机取一个。opts 不能为空。
+fn farthest_from_exit(opts: &[(usize, usize)]) -> (usize, usize) {
+    let far = opts.iter().map(|&c| dist_to_exit(c)).max().unwrap();
+    let best: Vec<(usize, usize)> = opts
+        .iter()
+        .copied()
+        .filter(|&c| dist_to_exit(c) == far)
+        .collect();
+    best[rand::random_range(0..best.len())]
 }
 
 /// 站在钟的左边、右边或正下方那格，就能敲钟
@@ -1158,7 +1368,7 @@ mod tests {
         let seen = w.render(1);
         assert!(seen.contains(AVATARS[0]), "看得见自己");
         assert!(seen.contains(AVATARS[5]), "看得见别人");
-        assert!(seen.contains("● 2"), "顶行绿点显示 2 人在线");
+        assert!(seen.contains("寺中 2 人"), "顶行显示在线人数 2");
 
         w.leave(2);
         assert!(!w.render(1).contains(AVATARS[5]), "走了就看不见了");
@@ -1172,7 +1382,7 @@ mod tests {
         put(&mut w, 1, (9, 4));
         let seen = w.render(1);
         assert!(seen.contains(CAT), "看得见猫");
-        assert!(seen.contains("● 1"), "猫不算在线玩家");
+        assert!(seen.contains("寺中 1 人"), "猫不算在线玩家");
     }
 
     #[test]
@@ -1232,46 +1442,23 @@ mod tests {
     }
 
     #[test]
-    fn npc_schedule_follows_shanghai_time() {
-        let m = |h: u32, mi: u32| h * 60 + mi;
-        // 早
-        assert_eq!(npc_for(m(5, 59)), None, "06 点前无人");
-        assert_eq!(npc_for(m(6, 0)).unwrap().at, GUARD_TREE);
-        assert!(npc_for(m(6, 0)).unwrap().line.contains("早"));
-        // 午饭寒暄
-        assert!(npc_for(m(10, 0)).unwrap().line.contains("中午"));
-        // 午休消失
-        assert_eq!(npc_for(m(12, 0)), None, "午休无人");
-        assert_eq!(npc_for(m(13, 59)), None);
-        // 下午进庙堂
-        let a = npc_for(m(14, 0)).unwrap();
-        assert_eq!(a.at, GUARD_HALL, "14–16 点在庙堂");
-        assert_eq!(a.glyph, GUARD);
-        // 16–18 也在庙堂
-        assert_eq!(npc_for(m(16, 0)).unwrap().at, GUARD_HALL);
-        // 志愿者夜场
-        let v = npc_for(m(18, 0)).unwrap();
-        assert_eq!((v.at, v.glyph), (VOLUNTEER_AT, VOLUNTEER));
-        assert!(v.line.contains("志願者"), "对话强调志愿者身份");
-        assert!(npc_for(m(21, 29)).is_some(), "21:29 志愿者还在");
-        assert_eq!(npc_for(m(21, 30)), None, "21:30 后无人");
-        assert_eq!(npc_for(m(3, 0)), None, "后半夜无人");
+    fn npc_only_ghost_at_deep_night() {
+        let m = |h: u32| h * 60;
+        // 工作人员都撤了，白天/傍晚都没人
+        assert_eq!(npc_for(m(6)), None);
+        assert_eq!(npc_for(m(10)), None);
+        assert_eq!(npc_for(m(14)), None);
+        assert_eq!(npc_for(m(18)), None);
+        assert_eq!(npc_for(m(23)), None);
+        // 只剩深夜 0–2 点的幽灵
+        assert_eq!(npc_for(m(1)).unwrap().glyph, GHOST);
+        assert_eq!(npc_for(m(2)), None);
     }
 
     #[test]
-    fn npc_and_tree_block_and_talk() {
+    fn tree_blocks_and_talks() {
         let mut w = World::default();
         w.join(1, 0);
-        w.update_npc(6 * 60); // 早上：大爷在树下 GUARD_TREE=(15,4)
-                              // 站到大爷相邻一格
-        put(&mut w, 1, (16, 4));
-        assert!(w.render(1).contains("按空格搭話"), "挨着 NPC 有提示");
-        assert!(matches!(w.handle(1, Key::Space), Action::Talk));
-        assert!(w.render(1).contains("🙋 「早"), "对话头像后带空格和引号");
-        assert!(matches!(w.handle(1, Key::Other), Action::Redraw)); // 起身
-                                                                    // NPC 挡路：往大爷那格走停住
-        assert!(matches!(w.handle(1, Key::Up), Action::Idle));
-        assert_eq!(w.pilgrims[&1].at, (16, 4));
         // 树可交互：站树上方 (13,4) 相邻，按空格看树
         put(&mut w, 1, (13, 4));
         assert!(w.render(1).contains("按空格看看"), "挨着树有提示");
@@ -1283,16 +1470,46 @@ mod tests {
     }
 
     #[test]
+    fn bell_reveals_the_letter_before_rising() {
+        // 撞钟 → 再按一次键亮出今日之信（人还起不来）→ 再按才起身
+        let mut w = World::default();
+        w.set_letter_text("今天是隔壁活動日".into());
+        w.join(1, 0);
+        put(&mut w, 1, (0, 3)); // 钟左邻
+        assert!(matches!(w.handle(1, Key::Space), Action::Ring), "撞钟");
+        // 第一次按键：自言自语念信，仍是 Redraw、仍在姿态里（信那行在、撞钟提示还没回来）
+        assert!(matches!(w.handle(1, Key::Other), Action::Redraw));
+        assert!(
+            w.render(1).contains("🧑 「今天是隔壁活動日」"),
+            "自己念出今日之信"
+        );
+        assert!(!w.render(1).contains("按空格撞鐘"), "还没起身");
+        // 第二次按键：起身，信收起，撞钟提示回来
+        assert!(matches!(w.handle(1, Key::Other), Action::Redraw));
+        assert!(!w.render(1).contains("今天是隔壁活動日"), "信收起");
+        assert!(w.render(1).contains("按空格撞鐘"), "起身后又能撞钟");
+    }
+
+    #[test]
+    fn bell_without_letter_rises_immediately() {
+        // 没配信：撞钟后一按键就直接起身，没有中间亮信那一下
+        let mut w = World::default();
+        w.join(1, 0);
+        put(&mut w, 1, (0, 3));
+        assert!(matches!(w.handle(1, Key::Space), Action::Ring));
+        assert!(matches!(w.handle(1, Key::Other), Action::Redraw));
+        assert!(w.render(1).contains("按空格撞鐘"), "没信就直接起身");
+    }
+
+    #[test]
     fn online_counts_only_connected_players() {
         let mut w = World::default();
         w.join(1, 0);
-        w.update_npc(8 * 60); // 早上大爷在
-                              // 在线数只算连进来的香客，NPC 不算
-        assert_eq!(w.online(), 1, "大爷不算在线玩家");
-        assert!(w.render(1).contains("● 1"));
+        assert_eq!(w.online(), 1);
+        assert!(w.render(1).contains("寺中 1 人"));
         w.join(2, 3);
-        assert_eq!(w.online(), 2);
-        assert!(w.render(1).contains("● 2"));
+        assert_eq!(w.online(), 2, "第二个人也算");
+        assert!(w.render(1).contains("寺中 2 人"));
     }
 
     #[test]
@@ -1315,48 +1532,41 @@ mod tests {
     }
 
     #[test]
-    fn staff_talk_says_letter_first_then_line() {
+    fn praying_is_solo_and_does_not_disturb_others() {
+        // 挨着别的玩家按空格：只有自己祈祷、只有自己化作 ✨、只有自己看到那行祈祷词
         let mut w = World::default();
-        w.set_letter_text("今天是隔壁活動日".into());
-        w.update_npc(6 * 60); // 早上：大爷在树下 (15,4)
-        w.join(1, 0);
-        put(&mut w, 1, (16, 4)); // 大爷相邻
-                                 // 第一下：先说今日之信
+        w.join(1, 0); // 头像 🧑
+        w.join(2, 3); // 头像 🧛
+        put(&mut w, 1, (10, 4));
+        put(&mut w, 2, (10, 5)); // 相邻
+        assert!(w.render(1).contains("按空格祈禱"), "挨着玩家有提示");
         assert!(matches!(w.handle(1, Key::Space), Action::Talk));
+        // 只有发起方看到祈祷词
+        assert!(w.render(1).contains("你進行了祈禱 🙏"), "自己看到祈祷词");
+        assert!(!w.render(2).contains("你進行了祈禱"), "对方看不到这行字");
+        // 只有发起方化作一簇 ✨
+        assert_eq!(w.render(1).matches("✨").count(), 1, "只有自己成星光");
+        // 对方完全没被牵动：还是自己的头像、没有祈祷词
+        assert!(w.render(2).contains("🧛"), "对方仍是头像");
+        // 自己按键起身
         assert!(
-            w.render(1).contains("🙋 「今天是隔壁活動日」"),
-            "先带一句信"
+            matches!(w.handle(1, Key::Space), Action::Redraw),
+            "空格起身"
         );
-        // 第二下（空格）：再说本来的话
-        assert!(matches!(w.handle(1, Key::Space), Action::Talk));
-        assert!(w.render(1).contains("🙋 「早"), "接着说本来的话");
-        // 之后任意键起身
-        assert!(matches!(w.handle(1, Key::Other), Action::Redraw));
-        assert!(!w.render(1).contains("「今天是隔壁活動日」"));
+        assert!(!w.render(1).contains("你進行了祈禱"), "起身后收起祈祷词");
+        assert_eq!(w.render(1).matches("✨").count(), 0, "起身后不再是星光");
     }
 
     #[test]
-    fn no_letter_or_ghost_talk_is_single_line() {
-        // 没配信：大爷直接说本来的话，一下就完
-        let mut w = World::default();
-        w.update_npc(6 * 60);
-        w.join(1, 0);
-        put(&mut w, 1, (16, 4));
-        assert!(matches!(w.handle(1, Key::Space), Action::Talk));
-        assert!(w.render(1).contains("🙋 「早"));
-        assert!(
-            matches!(w.handle(1, Key::Space), Action::Redraw),
-            "单句，空格即起身"
-        );
-
-        // 幽灵：即使配了信也只吐省略号
+    fn ghost_talk_is_single_line() {
+        // 幽灵：即使配了信也只吐省略号，不念信
         let mut w = World::default();
         w.set_letter_text("今天是隔壁活動日".into());
         w.update_npc(60); // 凌晨幽灵在钟右 (0,5)
-        w.join(2, 0);
-        put(&mut w, 2, (1, 5));
-        assert!(matches!(w.handle(2, Key::Space), Action::Talk));
-        let s = w.render(2);
+        w.join(1, 0);
+        put(&mut w, 1, (1, 5));
+        assert!(matches!(w.handle(1, Key::Space), Action::Talk));
+        let s = w.render(1);
         assert!(
             s.contains("👻 「......」") && !s.contains("活動日"),
             "幽灵单句"
@@ -1424,6 +1634,10 @@ mod tests {
         assert!(matches!(w.handle(1, Key::Right), Action::Redraw));
         assert_eq!(w.cart.as_ref().unwrap().at, (12, 5), "车往右一格");
         assert_eq!(w.pilgrims[&1].at, (12, 4), "人跟进车原来那格");
+        // 推车时底下点一行灰字「你正在推車」，下次行动即消
+        assert!(w.render(1).contains("\x1b[2m你正在推車"), "推车时灰字提示");
+        assert!(matches!(w.handle(1, Key::Down), Action::Redraw));
+        assert!(!w.render(1).contains("你正在推車"), "下次行动提示即消");
     }
 
     #[test]
@@ -1470,17 +1684,178 @@ mod tests {
     }
 
     #[test]
-    fn cart_pushed_outside_returns_to_courtyard() {
+    fn pushing_cart_into_the_hall_shows_a_gray_hint() {
+        // 把院子里的车往大殿里推、被行政墙挡住 → 底下亮一行灰字提示（不需起身），下次行动即消
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((7, 3)); // 正对寺门开口(6,3)
+        put(&mut w, 1, (8, 3)); // 车下方
+        assert!(matches!(w.handle(1, Key::Up), Action::Redraw));
+        let s = w.render(1);
+        assert!(s.contains("購物車不能推進室內"), "亮出灰字提示");
+        assert!(s.contains("\x1b[2m購物車"), "是灰字（dim）");
+        // 下一次行动（随便走一步）就把提示消掉，且不用起身
+        assert!(matches!(w.handle(1, Key::Down), Action::Redraw));
+        assert!(!w.render(1).contains("推進室內"), "下次行动提示即消");
+    }
+
+    #[test]
+    fn cart_pushed_out_bottom_returns_around_censer_flanks() {
         let mut w = World::default();
         w.join(1, 0);
         w.place_cart((17, 4)); // 下院底门开口
         put(&mut w, 1, (16, 4)); // 车上方
-                                 // 朝下推 → 越过底门出寺 → 车回到出生那几行随机位置
+                                 // 朝下推 → 越过树下底门出寺 → 落到香炉左三格/右三格及周围随机一格
         assert!(matches!(w.handle(1, Key::Down), Action::Redraw));
         let c = w.cart.as_ref().unwrap().at;
-        assert!(COURTYARD_ROWS.contains(&c.0), "回到出生那几行，实际 {c:?}");
-        assert_ne!(c, (17, 4), "不在原地");
+        assert!(
+            matches!(c, (7, 2) | (8, 1) | (7, 6) | (8, 7)),
+            "落到离出口至少两格的落点，实际 {c:?}"
+        );
         assert_eq!(w.pilgrims[&1].at, (17, 4), "人进到车原来那格");
+    }
+
+    #[test]
+    fn cart_pushed_out_censer_side_returns_below_tree() {
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((7, 0)); // 香炉那排最左的开口
+        put(&mut w, 1, (7, 1)); // 车右侧
+                                // 朝左推 → 从香炉左侧口出寺 → 落到树下两格
+        assert!(matches!(w.handle(1, Key::Left), Action::Redraw));
+        assert_eq!(w.cart.as_ref().unwrap().at, (16, 4), "落到树下两格");
+        assert_eq!(w.pilgrims[&1].at, (7, 0), "人进到车原来那格");
+    }
+
+    #[test]
+    fn cart_pushes_the_cat_along() {
+        // 车前方正好是猫：连猫一起推走，而不是撞猫弹开
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((12, 4));
+        w.pin_cat((12, 5)); // 车右侧就是猫
+        put(&mut w, 1, (12, 3)); // 人在车左侧
+        assert!(matches!(w.handle(1, Key::Right), Action::Redraw));
+        assert_eq!(w.cat_at, (12, 6), "猫被推着往右一格");
+        assert_eq!(w.cart.as_ref().unwrap().at, (12, 5), "车补进猫原来那格");
+        assert_eq!(w.pilgrims[&1].at, (12, 4), "人跟进车原来那格");
+    }
+
+    #[test]
+    fn pushed_cat_bounces_off_a_wall() {
+        // 猫被推向墙：和车一样沿垂直方向弹开，车补进猫原来那格
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((12, 2));
+        w.pin_cat((12, 1)); // 猫紧挨左墙（col0 是花篱）
+        put(&mut w, 1, (12, 3)); // 人在车右侧
+        assert!(matches!(w.handle(1, Key::Left), Action::Redraw));
+        assert!(
+            w.cat_at == (11, 1) || w.cat_at == (13, 1),
+            "猫撞墙往垂直弹开，实际 {:?}",
+            w.cat_at
+        );
+        assert_eq!(w.cart.as_ref().unwrap().at, (12, 1), "车补进猫原来那格");
+        assert_eq!(w.pilgrims[&1].at, (12, 2), "人跟进车原来那格");
+    }
+
+    #[test]
+    fn cat_pushed_out_bottom_respawns_around_censer_flanks() {
+        // 猫从树下底门被推出寺门：和车一样落到香炉左三/右三格及周围，车补进猫原来那格
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((16, 3));
+        w.pin_cat((17, 3)); // 猫站在下院底门开口
+        put(&mut w, 1, (15, 3)); // 人在车上方
+        assert!(matches!(w.handle(1, Key::Down), Action::Redraw));
+        assert!(
+            matches!(w.cat_at, (7, 2) | (8, 1) | (7, 6) | (8, 7)),
+            "猫落到离出口至少两格的落点，实际 {:?}",
+            w.cat_at
+        );
+        assert_eq!(w.cart.as_ref().unwrap().at, (17, 3), "车补进猫原来那格");
+        assert_eq!(w.pilgrims[&1].at, (16, 3), "人跟进车原来那格");
+    }
+
+    #[test]
+    fn shoved_cat_skips_its_next_wander() {
+        // 猫被推动后，下一拍定时随机溜达被打断（跳过一轮），之后恢复正常
+        let mut w = World::default();
+        w.join(1, 0);
+        // 猫默认在 (10,6)。把车摆在猫左边，人从更左边朝右推，把猫往右顶一格。
+        w.place_cart((10, 5));
+        put(&mut w, 1, (10, 4));
+        assert!(matches!(w.handle(1, Key::Right), Action::Redraw));
+        assert_eq!(w.cat_at, (10, 7), "猫被推到右边一格");
+        assert!(w.cat_shoved, "被推动后打上标记");
+        // 下一拍溜达：被打断，猫不动，标记消掉
+        let before = w.cat_at;
+        assert!(!w.wander_cat(), "这一轮溜达被跳过");
+        assert_eq!(w.cat_at, before, "猫这一轮没动");
+        assert!(!w.cat_shoved, "标记已消，下一轮恢复正常");
+    }
+
+    #[test]
+    fn bounce_prefers_away_from_the_exit() {
+        // 车在香炉左口 (7,0) 边上撞墙弹开：两侧 (7,1)/(9,1) 都能站，
+        // (7,1) 紧挨出口、(9,1) 更靠里 → 优先弹向更远离出口的 (9,1)。
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((8, 1)); // 紧挨左墙（col0 是花篱）
+        put(&mut w, 1, (8, 2)); // 车右侧
+        assert!(matches!(w.handle(1, Key::Left), Action::Redraw));
+        assert_eq!(w.cart.as_ref().unwrap().at, (9, 1), "弹向更远离出口的一侧");
+        assert_eq!(w.pilgrims[&1].at, (8, 1), "人进到车原来那格");
+    }
+
+    #[test]
+    fn cart_bounce_shoves_the_cat_out_of_the_way() {
+        // 车撞大殿行政墙往两侧弹：一侧是香炉(堵)，另一侧正好是猫。
+        // 猫能被推走，所以这一侧算可弹方向——车弹进去、把猫一并推开。
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((7, 3)); // 广场顶排、正对寺门开口(6,3)
+        w.pin_cat((7, 2)); // 车左侧就是猫；右侧(7,4)是香炉堵着
+        put(&mut w, 1, (8, 3)); // 人在车下方
+                                // 朝上推 → (6,3)是大殿行政墙 → 只能往左弹，那格是猫且猫能让开
+        assert!(matches!(w.handle(1, Key::Up), Action::Redraw));
+        assert_eq!(w.cart.as_ref().unwrap().at, (7, 2), "车弹进猫原来那格");
+        assert_eq!(w.cat_at, (7, 1), "猫被朝同方向(左)推开一格");
+        assert_eq!(w.pilgrims[&1].at, (7, 3), "人进到车原来那格");
+    }
+
+    #[test]
+    fn cart_respawn_spills_to_a_tree_neighbor_when_cat_is_there() {
+        // 树下两格 (16,4) 已经被猫占着，这时车又要从香炉侧口出寺 →
+        // 首选格被占，退到它紧邻的空格（树下相邻格），绝不和猫叠在同一格。
+        let mut w = World::default();
+        w.join(1, 0);
+        w.pin_cat((16, 4)); // 猫正好在树下两格
+        w.place_cart((7, 0)); // 车在香炉最左的开口
+        put(&mut w, 1, (7, 1)); // 人在车右侧
+        assert!(matches!(w.handle(1, Key::Left), Action::Redraw));
+        let c = w.cart.as_ref().unwrap().at;
+        assert_ne!(c, (16, 4), "没和猫叠在一起");
+        assert_eq!(
+            c.0.abs_diff(16) + c.1.abs_diff(4),
+            1,
+            "落到树下两格的紧邻格，实际 {c:?}"
+        );
+        assert_eq!(w.cat_at, (16, 4), "猫没被挤走");
+    }
+
+    #[test]
+    fn cat_pushed_out_censer_side_respawns_below_tree() {
+        // 猫从香炉侧口被推出寺门：落到树下两格
+        let mut w = World::default();
+        w.join(1, 0);
+        w.place_cart((7, 1));
+        w.pin_cat((7, 0)); // 猫在香炉那排最左的开口
+        put(&mut w, 1, (7, 2)); // 人在车右侧
+        assert!(matches!(w.handle(1, Key::Left), Action::Redraw));
+        assert_eq!(w.cat_at, (16, 4), "猫落到树下两格");
+        assert_eq!(w.cart.as_ref().unwrap().at, (7, 0), "车补进猫原来那格");
+        assert_eq!(w.pilgrims[&1].at, (7, 1), "人跟进车原来那格");
     }
 
     #[test]
@@ -1507,7 +1882,7 @@ mod tests {
         w.update_npc(m(14, 23));
         let screen = w.render(1);
         assert!(screen.contains("⚡  14:23"), "无天气时兜底 ⚡ + 时间");
-        assert!(screen.contains("● 1"), "顶行绿点显示在线数");
+        assert!(screen.contains("寺中 1 人"), "顶行显示在线人数");
     }
 
     #[test]
