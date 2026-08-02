@@ -232,6 +232,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gate = Arc::new(tokio::sync::Semaphore::new(max_sessions));
     println!("[小鐘寺] ssh  進寺上限 {max_sessions}");
 
+    // 握手并发上限（默认 128）：防暴力灌连接。名额在真正进寺前就占，握手一结束
+    // （成功或失败）立刻释放，所以正常访客几乎无感；只有瞬时洪水把握手名额占满时，
+    // 多余连接被直接丢弃、不做昂贵的密钥交换，从而保住 CPU 不被握手风暴吃光。
+    let max_handshakes: usize = std::env::var("XIAOZHONGSI_MAX_HANDSHAKES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    let handshake_gate = Arc::new(tokio::sync::Semaphore::new(max_handshakes));
+    println!("[小鐘寺] ssh  握手上限 {max_handshakes}");
+
     let temple = Temple {
         counter: Arc::clone(&counter),
         avatars: Arc::clone(&avatars),
@@ -255,10 +265,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let next_id = Arc::clone(&next_id);
         let world = Arc::clone(&world);
         let tick = tick.clone();
+        let handshake_gate = Arc::clone(&handshake_gate);
         println!("[小鐘寺] ssh  门开在 {port}");
         tasks.push(tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = socket.accept().await else {
+                    continue;
+                };
+                // 握手名额已满（正被暴力灌连接）：连密钥交换都不做，直接丢弃这条连接。
+                // 名额握手结束就还，所以正常访客几乎永远抢得到。
+                let Ok(hs_permit) = Arc::clone(&handshake_gate).try_acquire_owned() else {
+                    // 断开前先写一行纯文本横幅：SSH 协议允许在版本号交换前发文本，
+                    // openssh 会打出来。不做密钥交换，几乎零成本，让被限流的人也看到提示。
+                    // 单独 spawn 且套 2 秒超时——不占用 accept 循环，也防不读数据的恶意
+                    // 连接把 socket 挂住堆积。写完必须 flush + shutdown 优雅半关（发 FIN），
+                    // 否则客户端刚连上发来的版本号还在接收缓冲里，直接 drop 会触发 RST
+                    // 把横幅冲掉，客户端只看到「Connection reset by peer」。
+                    tokio::spawn(async move {
+                        let mut stream = stream;
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                            stream
+                                .write_all("寺中擁擠 · 稍後再來 🔔\r\n".as_bytes())
+                                .await?;
+                            stream.flush().await?;
+                            stream.shutdown().await
+                        })
+                        .await;
+                    });
                     continue;
                 };
                 // 一律接进来握手：名额在真正进寺（shell/exec）那刻才占，
@@ -270,7 +303,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let world = Arc::clone(&world);
                 let tick = tick.clone();
                 tokio::spawn(async move {
-                    match russh::server::run_stream(config, stream, temple).await {
+                    let outcome = russh::server::run_stream(config, stream, temple).await;
+                    // 握手已结束（成功或失败），立刻让出握手名额，别占着长连接的份。
+                    drop(hs_permit);
+                    match outcome {
                         Ok(session) => {
                             let _ = session.await;
                         }
