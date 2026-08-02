@@ -129,6 +129,7 @@ Configuration is via environment variables:
 | `XIAOZHONGSI_DATA_DIR` | `data` | where the log and chosen avatars are written |
 | `XIAOZHONGSI_SALT` | `xiaozhongsi` | hashing salt — change it in production |
 | `XIAOZHONGSI_MAX_SESSIONS` | `32` | people allowed inside at once; beyond it a new visitor is met with a "temple is full, come back later" line and disconnected |
+| `XIAOZHONGSI_MAX_HANDSHAKES` | `128` | a flood shield: the most SSH handshakes allowed in flight at once. Keep it above `XIAOZHONGSI_MAX_SESSIONS` (see below) |
 | `XIAOZHONGSI_HOST_KEY` | `host_key` | OpenSSH host key path (generated on first run if absent) |
 | `XIAOZHONGSI_HOST_KEY_PEM` | — | host key as inline PEM; overrides the file, handy for stateless containers |
 | `XIAOZHONGSI_LETTER` | — | today's letter; right after you strike the bell, pressing a key makes you murmur it to yourself as `{you} 「…」` before another key lets you rise. Unset means striking the bell just rises |
@@ -140,6 +141,25 @@ Configuration is via environment variables:
 Rings are counted per public-key fingerprint. Nothing on disk holds the
 fingerprint itself: both the log and the remembered avatars are keyed by
 `sha256(salt + fingerprint)` truncated to 16 hex chars.
+
+### 🌊 Full temple, and a flood shield
+
+Being "full" happens in two tiers. A visitor's slot is claimed only once they
+actually enter the hall, *after* the SSH handshake — so when the hall already
+holds `XIAOZHONGSI_MAX_SESSIONS` people, the next one still completes a full
+handshake and is then met with the polite `寺中擁擠 · 香客已滿 · 稍後再來 🔔`
+line before disconnecting.
+
+That handshake is a real curve25519 key exchange, so a burst of connections
+costs CPU even when everyone is turned away. `XIAOZHONGSI_MAX_HANDSHAKES`
+(default 128, released the instant a handshake finishes) caps how many run at
+once. Under a flood the excess connections are dropped *before* the key
+exchange — no crypto spent — after a cheap plaintext banner
+(`寺中擁擠 · 稍後再來 🔔`) written ahead of the SSH version string. openssh logs
+such pre-version lines at debug level, so a plain client only sees
+`Connection closed by remote host`; the banner shows up under `ssh -v` and to
+raw/library clients. Delivering a visible message here would require finishing
+the handshake — exactly the cost the shield exists to avoid.
 
 ### 🩺 Probes
 
