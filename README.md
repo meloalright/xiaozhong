@@ -5,6 +5,7 @@ burn incense and hear the day's letter, pet the temple cat, wander down to the
 courtyard to see the old tree, pray beside other pilgrims, shove the shopping
 cart around, and watch the status bar track the real weather and clock at the
 Big Bell Temple in Beijing — while everyone else inside sees you move, live.
+Inspired by [mpiorowski/late-sh](https://github.com/mpiorowski/late-sh).
 
 ```console
 $ ssh xiaozhongsi.sh
